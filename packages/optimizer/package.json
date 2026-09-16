@@ -1,0 +1,12 @@
+{
+  "name": "@promptslim/optimizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@promptslim/shared-types": "workspace:*",
+    "@promptslim/token-counter": "workspace:*"
+  },
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" }
+}

@@ -1,0 +1,8 @@
+PromptPolice server on http://localhost:8787 (db: ../../.scratch/e2e3.db)
+chat-blocked user=1 verdict=block reasons=Blocked: instruction-override attempt, system-prompt extraction attempt detected.;Blocked: instruction-override attempt, system-prompt extraction attempt detected.
+chat-blocked user=1 verdict=redact-required reasons=Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.;Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.
+chat-blocked user=2 verdict=block reasons=Blocked: instruction-override attempt, system-prompt extraction attempt detected.;Blocked: instruction-override attempt, system-prompt extraction attempt detected.
+chat-blocked user=2 verdict=redact-required reasons=Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.;Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.
+chat-blocked user=3 verdict=block reasons=Blocked: instruction-override attempt, system-prompt extraction attempt detected.;Blocked: instruction-override attempt, system-prompt extraction attempt detected.
+chat-blocked user=3 verdict=redact-required reasons=Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.;Sensitive data found: Phone number. Redaction offered; cache reuse limited to exact same-prompt hits.
+chat-blocked user=5 verdict=block reasons=Blocked: instruction-override attempt, system-prompt extraction attempt detected.;Blocked: instruction-override attempt, system-prompt extraction attempt detected.

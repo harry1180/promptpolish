@@ -1,0 +1,21 @@
+{
+  "name": "promptpolice",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PromptPolice — LLM prompt cost optimizer. Measure. Optimize. Compare. Save.",
+  "packageManager": "pnpm@12.4.2",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "pnpm --filter @promptslim/web dev",
+    "server": "pnpm --filter @promptslim/server dev",
+    "dev:all": "pnpm --parallel --filter @promptslim/web --filter @promptslim/server dev",
+    "build": "pnpm --filter @promptslim/web build",
+    "preview": "pnpm --filter @promptslim/web preview",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

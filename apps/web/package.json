@@ -1,0 +1,40 @@
+{
+  "name": "@promptslim/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@promptslim/analytics": "workspace:*",
+    "@promptslim/cache": "workspace:*",
+    "@promptslim/governance": "workspace:*",
+    "@promptslim/model-config": "workspace:*",
+    "@promptslim/optimizer": "workspace:*",
+    "@promptslim/pricing-engine": "workspace:*",
+    "@promptslim/privacy-detector": "workspace:*",
+    "@promptslim/shared": "workspace:*",
+    "@promptslim/shared-types": "workspace:*",
+    "@promptslim/token-counter": "workspace:*",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^5.0.0"
+  }
+}

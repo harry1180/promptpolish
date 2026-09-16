@@ -1,0 +1,151 @@
+{
+  "pricingLastUpdated": "2026-09-15",
+  "disclaimer": "Prices are list prices per 1M tokens for standard API tiers, verified against public pricing pages and current third-party trackers on 2026-09-15. Model pricing changes frequently — verify against the provider's official page before relying on these numbers. DeepSeek rates shown are peak-hours cache-miss rates.",
+  "models": [
+    {
+      "id": "gpt-5.4",
+      "provider": "OpenAI",
+      "modelName": "GPT-5.4",
+      "inputPricePerMillionTokens": 2.5,
+      "outputPricePerMillionTokens": 15,
+      "contextWindow": 400000,
+      "tokenizerType": "o200k",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "provider": "OpenAI",
+      "modelName": "GPT-5.4 Nano",
+      "inputPricePerMillionTokens": 0.2,
+      "outputPricePerMillionTokens": 1.25,
+      "contextWindow": 400000,
+      "tokenizerType": "o200k",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "gpt-6-astra",
+      "provider": "OpenAI",
+      "modelName": "GPT-6 Astra",
+      "inputPricePerMillionTokens": 10,
+      "outputPricePerMillionTokens": 50,
+      "contextWindow": 1000000,
+      "tokenizerType": "o200k",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "provider": "Anthropic",
+      "modelName": "Claude Sonnet 5",
+      "inputPricePerMillionTokens": 2,
+      "outputPricePerMillionTokens": 10,
+      "contextWindow": 200000,
+      "tokenizerType": "heuristic",
+      "notes": "Introductory $2/$10 pricing became standard on 2026-09-01.",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "claude-opus-5",
+      "provider": "Anthropic",
+      "modelName": "Claude Opus 5",
+      "inputPricePerMillionTokens": 5,
+      "outputPricePerMillionTokens": 25,
+      "contextWindow": 200000,
+      "tokenizerType": "heuristic",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "Anthropic",
+      "modelName": "Claude Haiku 4.5",
+      "inputPricePerMillionTokens": 1,
+      "outputPricePerMillionTokens": 5,
+      "contextWindow": 200000,
+      "tokenizerType": "heuristic",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "gemini-3-flash",
+      "provider": "Google",
+      "modelName": "Gemini 3 Flash",
+      "inputPricePerMillionTokens": 0.5,
+      "outputPricePerMillionTokens": 3,
+      "contextWindow": 1000000,
+      "tokenizerType": "heuristic",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "provider": "Google",
+      "modelName": "Gemini 3.1 Pro",
+      "inputPricePerMillionTokens": 1.25,
+      "outputPricePerMillionTokens": 10,
+      "contextWindow": 1000000,
+      "tokenizerType": "heuristic",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "deepseek-flash",
+      "provider": "DeepSeek",
+      "modelName": "DeepSeek V4.1 Flash",
+      "inputPricePerMillionTokens": 0.3,
+      "outputPricePerMillionTokens": 1.2,
+      "contextWindow": 1000000,
+      "tokenizerType": "tiktoken",
+      "notes": "Peak rate, cache miss (DeepSeek-V4.1-Flash). Off-peak is half; cache-hit input from $0.003-0.006. Verify billing window when using.",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "provider": "DeepSeek",
+      "modelName": "DeepSeek V4 Pro",
+      "inputPricePerMillionTokens": 1.32,
+      "outputPricePerMillionTokens": 3.96,
+      "contextWindow": 1000000,
+      "tokenizerType": "tiktoken",
+      "notes": "Peak rate, cache miss (deepseek-v4-pro). Off-peak is half.",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "qwen3-max",
+      "provider": "Qwen",
+      "modelName": "Qwen3 Max",
+      "inputPricePerMillionTokens": 0.5,
+      "outputPricePerMillionTokens": 5,
+      "contextWindow": 262144,
+      "tokenizerType": "tiktoken",
+      "notes": "Qwen API list price; some resellers discount.",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "qwen3-turbo",
+      "provider": "Qwen",
+      "modelName": "Qwen3 Turbo",
+      "inputPricePerMillionTokens": 0.05,
+      "outputPricePerMillionTokens": 0.5,
+      "contextWindow": 131072,
+      "tokenizerType": "tiktoken",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "mistral-medium",
+      "provider": "Mistral",
+      "modelName": "Mistral Medium",
+      "inputPricePerMillionTokens": 0.4,
+      "outputPricePerMillionTokens": 2,
+      "contextWindow": 131072,
+      "tokenizerType": "tiktoken",
+      "lastUpdated": "2026-09-15"
+    },
+    {
+      "id": "llama-4-maverick",
+      "provider": "Meta",
+      "modelName": "Llama 4 Maverick (hosted)",
+      "inputPricePerMillionTokens": 0.5,
+      "outputPricePerMillionTokens": 2,
+      "contextWindow": 1000000,
+      "tokenizerType": "tiktoken",
+      "notes": "Open-weight model: hosted providers vary; this is a typical mid-market hosted rate.",
+      "lastUpdated": "2026-09-15"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@promptslim/pricing-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@promptslim/shared-types": "workspace:*",
+    "@promptslim/model-config": "workspace:*"
+  },
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" }
+}

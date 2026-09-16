@@ -1,0 +1,101 @@
+@import 'tailwindcss';
+
+/* PromptPolice design tokens — dark premium developer aesthetic:
+   near-black navy base, one teal accent for savings/positive, amber for
+   warnings, mono type for numeric emphasis. System font stack only
+   (no web fonts => fast, no privacy questions). */
+
+@theme {
+  --color-ink-950: #070b12;
+  --color-ink-900: #0b1018;
+  --color-ink-800: #111827;
+  --color-ink-700: #1b2537;
+  --color-ink-600: #2a3950;
+  --color-line: #1e2a3d;
+  --color-mist: #93a4bd;
+  --color-slate-soft: #c6d2e3;
+  --color-mint: #34f5c5;
+  --color-mint-dim: #19c99b;
+  --color-amber-soft: #fbbf24;
+  --color-danger: #f87171;
+  --color-violet-soft: #8b7cf6;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-ink-950);
+  color: var(--color-slate-soft);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-mint) 35%, transparent);
+}
+
+/* subtle premium background */
+.bg-hero {
+  background:
+    radial-gradient(1100px 420px at 70% -10%, rgba(52, 245, 197, 0.07), transparent 60%),
+    radial-gradient(800px 400px at 10% 10%, rgba(139, 124, 246, 0.06), transparent 55%),
+    linear-gradient(180deg, #0a101c 0%, var(--color-ink-950) 100%);
+}
+
+.card {
+  background: color-mix(in srgb, var(--color-ink-800) 78%, transparent);
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+}
+
+/* number pop on optimization complete */
+@keyframes countPop {
+  0% { transform: scale(0.86); opacity: 0.35; }
+  60% { transform: scale(1.035); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.animate-pop {
+  animation: countPop 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes fadeSlide {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-slide {
+  animation: fadeSlide 0.4s ease-out both;
+}
+
+/* diff view */
+.diff-removed {
+  color: #8fa0b8;
+  background: rgba(248, 113, 113, 0.12);
+  text-decoration: line-through;
+  text-decoration-color: rgba(248, 113, 113, 0.55);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.diff-added {
+  color: var(--color-mint);
+  background: rgba(52, 245, 197, 0.09);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/* scrollbars in prompt panes */
+.thin-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.thin-scroll::-webkit-scrollbar-thumb { background: var(--color-ink-600); border-radius: 8px; }
+.thin-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* focus visibility for a11y */
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-mint) 70%, transparent);
+  outline-offset: 2px;
+}
+
+textarea { tab-size: 2; }

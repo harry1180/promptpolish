@@ -1,0 +1,24 @@
+{
+  "name": "@promptslim/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@promptslim/analytics": "workspace:*",
+    "@promptslim/governance": "workspace:*",
+    "@promptslim/llm-connect": "workspace:*",
+    "@promptslim/model-config": "workspace:*",
+    "@promptslim/pricing-engine": "workspace:*",
+    "@promptslim/shared-types": "workspace:*",
+    "@promptslim/token-counter": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
