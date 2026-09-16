@@ -217,9 +217,16 @@ never model discretion. Three layers, one pure sync pass (`governQuery`):
    (block), system-prompt extraction (block), role-spoofing (review),
    jailbreak markers (review), disallowed-content (block) — plus an
    English-only input gate (block): the rules above are English patterns,
-   so non-Latin-script input (the translation-jailbreak class) is refused
-   before optimization, caching, or any provider call. Accented Latin
-   letters and typographic punctuation in English prose are allowed.
+   so non-English input (the translation-jailbreak class) is refused
+   before optimization, caching, or any provider call. The gate is
+   semantic, not script-based: `franc` trigram language detection over
+   ~180 languages (Latin-script non-English — French, romanized Hindi —
+   is now caught too) combined with a Unicode `\p{Script=Latin}` scan
+   (a foreign-script payload smuggled into an English-dominant thread is
+   caught even when the classifier votes `eng`). Two English-confidence
+   rescues (English trigram score, English function-word share) prevent
+   false-blocking colloquial or jargon-heavy English; accented Latin
+   letters and typographic punctuation in English prose stay allowed.
 
 **Verdict ladder** (worst wins): `allow → review → redact-required → block`.
 Regulated intents downgrade at least to `review`. `reuseSafe` requires

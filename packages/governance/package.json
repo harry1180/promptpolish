@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": {
-    "@promptslim/shared-types": "workspace:*",
-    "@promptslim/privacy-detector": "workspace:*"
+  "exports": {
+    ".": "./src/index.ts"
   },
-  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" }
+  "dependencies": {
+    "@promptslim/privacy-detector": "workspace:*",
+    "@promptslim/shared-types": "workspace:*",
+    "franc-min": "^6.2.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  }
 }

@@ -170,8 +170,9 @@ export function AskPanel({
         Governance: queries labeled <span className="text-danger">block</span> or{' '}
         <span className="text-amber-soft">redact-required</span> (PII, injection attempts) are refused
         by the server before anything is sent to a provider — refusal costs nothing and is audited.
-        Governed input is <span className="text-slate-soft">English-only</span>: non-English text
-        (any script) is refused too, because translated instructions bypass the English guardrail
+        Governed input is <span className="text-slate-soft">English-only</span>: text the language
+        detector identifies as non-English — in any script, Latin ones included — is refused too,
+        because translated instructions bypass the English guardrail
         rules — the classic translation-jailbreak class. Every accepted call is recorded with its
         exact provider usage and your account&apos;s tags, so it shows up in the executive dashboard
         rollups.
