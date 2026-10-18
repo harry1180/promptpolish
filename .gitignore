@@ -6,3 +6,9 @@ dist/
 coverage/
 .env
 .env.local
+.env.*
+!.env.example
+*.secret
+secrets/
+*.key
+!apps/server/data/

@@ -1,0 +1,89 @@
+# PromptPolice — public edge exposure on the shared Traefik proxy
+# (/docker/traefik-ffmn, host network, TLS via `letsencrypt`).
+#
+# Nothing publishes a raw public port. Routing on
+# https://governance.agenticalchemy.io (priority order — higher wins):
+#
+#   61  pp-api     PathPrefix(`/pp/api/`)  → server:8787, stripprefix `/pp`
+#   60  pp-web     Path(`/`) | Path(`/index.html`) | PathPrefix(`/assets/`) → web:80
+#   50/40  live    the /live transcription sidecar (project `ttv`)
+#   30/20  console the cx-trust console (/_next, /api, /console, basic auth)
+#   10  cxtrust    catch-all → the cx-trust API
+#
+# Two things are deliberate:
+#  - the SPA owns ONLY `/`, `/index.html` and `/assets/*` — everything else on
+#    this host stays with the apps that already claim it;
+#  - `/api` is owned by the cx-trust console, so this app's org API is served
+#    under `/pp/api/*` (the bundle is built with VITE_API_BASE=/pp and
+#    `pp-strip` restores the `/api` prefix before the request reaches
+#    apps/server, whose routes are all `/api/...`).
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_BASE: /pp
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.pp-web.loadbalancer.server.port=80
+      - traefik.http.routers.pp-web.entrypoints=websecure
+      - traefik.http.routers.pp-web.priority=60
+      - traefik.http.routers.pp-web.rule=Host(`governance.agenticalchemy.io`) && (Path(`/`) || Path(`/index.html`) || PathPrefix(`/assets/`) || PathPrefix(`/agent-control-tower`) || PathPrefix(`/tradingusa`))
+      - traefik.http.routers.pp-web.service=pp-web
+      - traefik.http.routers.pp-web.tls.certresolver=letsencrypt
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    # Secrets live OUTSIDE the repo (chmod 600, gitignored patterns) and are
+    # injected as container process-env only — never baked into the image,
+    # never sent to the browser. Values are read server-side by InferenceRouter.
+    env_file:
+      - /opt/yard/tradingusa/.env
+    # local debugging only (the cx-trust API already owns 127.0.0.1:8787)
+    ports:
+      - "127.0.0.1:8791:8787"
+    environment:
+      PORT: "8787"
+      PP_DB: /data/promptpolice.db
+      # Secure cookies: the public origin is TLS-terminated at Traefik.
+      PP_COOKIE_SECURE: "1"
+      # Agent Control Tower: demo store is on by default; production requires
+      # BOTH server configuration and tenant entitlement (never a UI toggle).
+      ACT_DEMO_ENABLED: "1"
+      ACT_PROD_ENABLED: "0"
+      ACT_PROD_ENTITLED: "0"
+      # TradingUSA (paper trading only — ExecutionGuard PAPER_ONLY)
+      TU_DB: /data/tradingusa.db
+      TU_WORKERS: "1"
+      PILOT_MODE: "true"
+      # Model IDs discovered live from each provider's /models endpoint
+      # (retired IDs return 404; override here without touching code):
+      TU_GROQ_MODEL: "openai/gpt-oss-120b"
+      TU_GEMINI_MODEL: "gemini-2.5-flash"
+    volumes:
+      # SQLite db + auto-generated PP master key (provider keys at rest)
+      - pp-data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.pp-api.loadbalancer.server.port=8787
+      - traefik.http.middlewares.pp-strip.stripprefix.prefixes=/pp
+      - traefik.http.routers.pp-api.entrypoints=websecure
+      - traefik.http.routers.pp-api.priority=61
+      - traefik.http.routers.pp-api.rule=Host(`governance.agenticalchemy.io`) && PathPrefix(`/pp/api/`)
+      - traefik.http.routers.pp-api.middlewares=pp-strip
+      - traefik.http.routers.pp-api.service=pp-api
+      - traefik.http.routers.pp-api.tls.certresolver=letsencrypt
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 2s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  pp-data:
