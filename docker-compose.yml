@@ -65,6 +65,13 @@ services:
       # Crypto spot book (paper only, long-only, 24/7 scheduler)
       CRYPTO_DB: /data/crypto.db
       CRYPTO_WORKERS: "1"
+      # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
+      # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
+      CRYPTO_FEE_PCT: "0.0016"
+      # Exit geometry: target = price + 3*ATR14 instead of the next resistance
+      # (S/R targets sat inside the 1.5R floor and were discarded: 714 -> 97
+      # sane-gate rejects; +$3.9k vs -$2.3k net with the fee above).
+      CRYPTO_TARGET_MODE: "atr3"
       PILOT_MODE: "true"
       # Model IDs discovered live from each provider's /models endpoint
       # (retired IDs return 404; override here without touching code):
