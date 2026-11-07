@@ -168,3 +168,59 @@ export function horizonEconomics(
   const costRtPct = (feePctPerSide + slippagePerSidePct) * 2 * 100;
   return { horizon, costRtPct, requiredMovePct: costRtPct };
 }
+
+/* ------------------------------------------------------------------ */
+/* cross-venue lead-lag (Priority 1 measurement, pure)                */
+/* ------------------------------------------------------------------ */
+
+export interface LeadLagState {
+  /** venue -> price at its own last scored move */
+  lastScoredPrice: Record<string, number>;
+  /** venue -> ms of its own last scored move */
+  lastMoveAt: Record<string, number>;
+}
+
+export function newLeadLagState(): LeadLagState {
+  return { lastScoredPrice: {}, lastMoveAt: {} };
+}
+
+export interface MoveEvent {
+  venue: string;
+  /** true when the OTHER venue moved within the window just before this one */
+  follower: boolean;
+  /** ms the leading venue moved before this one (only when follower) */
+  lagMs: number | null;
+}
+
+/**
+ * A venue "moves" when its price changes by >= thresholdBps versus its own
+ * last scored move. If the other venue moved within windowMs before this
+ * one, this move is the FOLLOWER of that lead; otherwise it originates a
+ * fresh move (leader). First observation only primes state.
+ */
+export function leadLagUpdate(
+  state: LeadLagState,
+  venue: string,
+  price: number,
+  nowMs: number,
+  opts: { thresholdBps?: number; windowMs?: number } = {},
+): MoveEvent | null {
+  const thresholdBps = opts.thresholdBps ?? 1;
+  const windowMs = opts.windowMs ?? 3_000;
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const prev = state.lastScoredPrice[venue];
+  if (prev === undefined) {
+    state.lastScoredPrice[venue] = price;
+    return null; // first observation only primes state
+  }
+  if ((Math.abs(price - prev) / prev) * 10_000 < thresholdBps) return null;
+  state.lastScoredPrice[venue] = price;
+  const other = Object.keys(state.lastMoveAt).find((v) => v !== venue);
+  state.lastMoveAt[venue] = nowMs;
+  if (other === undefined) return { venue, follower: false, lagMs: null };
+  const otherAt = state.lastMoveAt[other];
+  if (otherAt !== undefined && nowMs >= otherAt && nowMs - otherAt <= windowMs) {
+    return { venue, follower: true, lagMs: nowMs - otherAt };
+  }
+  return { venue, follower: false, lagMs: null };
+}

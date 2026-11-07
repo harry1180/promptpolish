@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   directionalStats, evGate, firstPassage, hitProbabilities,
-  horizonEconomics, wilson,
+  horizonEconomics, leadLagUpdate, newLeadLagState, wilson,
 } from '../src/crypto/research.ts';
 
 test('wilson: known interval, n=0 stays null', () => {
@@ -82,4 +82,17 @@ test('horizonEconomics: real fee tiers set the break-even bar', () => {
   const tier1 = horizonEconomics('30s', 0.008, 0.0005); // Kraken tier-1 taker 0.80%
   assert.ok(Math.abs(tier1.costRtPct - 1.7) < 1e-9, '0.80%*2 + 5bps*2 = 1.70% RT');
   assert.ok(tier1.requiredMovePct > cheap.requiredMovePct * 3);
+});
+
+test('leadLagUpdate: threshold moves, follower window, leader otherwise', () => {
+  const s = newLeadLagState();
+  assert.equal(leadLagUpdate(s, 'kraken', 100, 1000), null, 'first observation primes state');
+  assert.equal(leadLagUpdate(s, 'kraken', 100.005, 1500), null, '0.5bp < 1bp threshold');
+  const e2 = leadLagUpdate(s, 'kraken', 100.02, 2000);
+  assert.ok(e2 && !e2.follower, 'only venue seen so far -> originator');
+  assert.equal(leadLagUpdate(s, 'coinbase', 100.03, 2600), null, 'the other venue primes on first sight too');
+  const e3 = leadLagUpdate(s, 'coinbase', 100.05, 2800);
+  assert.ok(e3 && e3.follower && e3.lagMs === 800, 'lag = now - leader move time');
+  const e4 = leadLagUpdate(s, 'coinbase', 100.08, 7800);
+  assert.ok(e4 && !e4.follower, 'outside the 3s window -> fresh move');
 });
