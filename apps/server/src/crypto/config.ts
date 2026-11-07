@@ -60,6 +60,29 @@ function microFromEnv(env: Record<string, string | undefined>): MicroFlagsConfig
   };
 }
 
+/**
+ * Multi-exchange market-intelligence layer (docs/XCHANGE.md).
+ *
+ * DATA ONLY: these feeds observe five extra venues plus three REST context
+ * sources and never reach the broker — Kraken stays the execution reference.
+ * Every default is the safe one: layer on, context on, no API keys required.
+ */
+export interface XchangeConfig {
+  enabled: boolean;
+  /** venue ids to run alongside Kraken (the reference feed) */
+  venues: string[];
+  /** canonical bases to monitor on every venue */
+  symbols: string[];
+  /** preferred quote; USD venues and USDT/USDC venues are never merged */
+  quote: string;
+  /** REST context sources (DEX Screener / GeckoTerminal / CoinGecko) */
+  contextEnabled: boolean;
+  /** CoinGecko demo key from env only — never emitted through any API */
+  coingeckoKey: string | null;
+  /** REST context poll interval, ms */
+  contextPollMs: number;
+}
+
 export interface CryptoConfig {
   executionMode: 'PAPER_ONLY';
   /** single spot book — long-only, no leverage, no shorting */
@@ -112,6 +135,7 @@ export interface CryptoConfig {
    */
   fusionWeights: Partial<ScoreParts> | null;
   micro: MicroFlagsConfig;
+  xchange: XchangeConfig;
 }
 
 function num(v: string | undefined, d: number): number {
@@ -139,6 +163,32 @@ function fusionWeightsFromEnv(raw: string | undefined): Partial<ScoreParts> | nu
   }
 }
 
+/** Venues this build can start — only what is wired in providers/index.ts. */
+const XCHANGE_VENUES = ['coinbase'];
+
+/** CRYPTO_XCHANGE_* knobs. Unknown venue ids are dropped (never guessed at),
+ *  an empty list disables the live layer but keeps the endpoints answering. */
+function xchangeFromEnv(env: Record<string, string | undefined>): XchangeConfig {
+  const venues = (env.CRYPTO_XCHANGE_VENUES ?? XCHANGE_VENUES.join(','))
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => XCHANGE_VENUES.includes(s));
+  const symbols = (env.CRYPTO_XCHANGE_SYMBOLS ?? 'BTC,ETH')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => /^[A-Z0-9]{2,10}$/.test(s));
+  const quote = (env.CRYPTO_XCHANGE_QUOTE ?? 'USD').trim().toUpperCase();
+  return {
+    enabled: bool(env.CRYPTO_XCHANGE_ENABLED, true),
+    venues: [...new Set(venues)],
+    symbols: symbols.length > 0 ? [...new Set(symbols)] : ['BTC', 'ETH'],
+    quote: ['USD', 'USDT', 'USDC'].includes(quote) ? quote : 'USD',
+    contextEnabled: bool(env.CRYPTO_XCHANGE_CONTEXT, false),
+    coingeckoKey: env.COINGECKO_DEMO_KEY && env.COINGECKO_DEMO_KEY.trim() ? env.COINGECKO_DEMO_KEY.trim() : null,
+    contextPollMs: num(env.CRYPTO_XCHANGE_CONTEXT_POLL_MS, 300_000),
+  };
+}
+
 export function cryptoConfigFromEnv(env: Record<string, string | undefined> = process.env): CryptoConfig {
   return {
     executionMode: EXECUTION_MODE,
@@ -162,6 +212,7 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
     scanIntervalSec: num(env.CRYPTO_SCAN_INTERVAL, 300),
     fusionWeights: fusionWeightsFromEnv(env.CRYPTO_FUSION_WEIGHTS),
     micro: microFromEnv(env),
+    xchange: xchangeFromEnv(env),
   };
 }
 

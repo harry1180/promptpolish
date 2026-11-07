@@ -15,6 +15,7 @@ import { FUSION_WEIGHTS } from '@promptslim/tucore';
 import { learnedWeights } from '../tradingusa/adaptive.ts';
 import { experimentSummary } from '../tradingusa/experiments.ts';
 import { evaluateFixedHorizons } from './accuracy.ts';
+import { handleXchange } from '../xchange/routes.ts';
 import { CRYPTO_SESSION, type CryptoConfig } from './config.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, loadBars, openPositions, type PositionRow } from './broker.ts';
 import { CRYPTO_STRATEGY } from './engine.ts';
@@ -374,6 +375,11 @@ export async function handleCrypto(
           jobs: db.prepare('SELECT name, last_status, duration_ms, last_error FROM system_jobs ORDER BY name').all(),
         },
       });
+    }
+
+    /* ---------------- multi-exchange market intelligence ---------------- */
+    if (rest.length >= 1 && ['providers', 'xchange', 'sources', 'context'].includes(rest[0])) {
+      return await handleXchange(req, res, rest, { runtime, json });
     }
 
     return done({ status: 404, body: { error: 'unknown crypto endpoint' } });

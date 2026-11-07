@@ -65,6 +65,12 @@ services:
       # Crypto spot book (paper only, long-only, 24/7 scheduler)
       CRYPTO_DB: /data/crypto.db
       CRYPTO_WORKERS: "1"
+      # Multi-exchange market intelligence (docs/XCHANGE.md) — DATA ONLY:
+      # Kraken stays the execution reference; Coinbase is the first additional
+      # live source, research-only. Optional venues stay out of the registry.
+      CRYPTO_XCHANGE_ENABLED: "1"
+      CRYPTO_XCHANGE_VENUES: "coinbase"
+      CRYPTO_XCHANGE_CONTEXT: "0"
       # Microstructure Alpha Engine — SHADOW ONLY (docs/CRYPTO-MICRO.md):
       # computes/records micro features from the SAME Kraken WS connection
       # (adds a `trade` subscription on it); decision impact is NONE and
