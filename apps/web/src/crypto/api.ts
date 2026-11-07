@@ -262,3 +262,227 @@ export const getExperiments = (from: string, to?: string): Promise<ExperimentsRe
 };
 
 export const runCycle = (): Promise<RunResponse> => post<RunResponse>('/run');
+
+/* ------------------------------------------------------------------ */
+/* multi-exchange market intelligence (research-only, decisionImpact   */
+/* 'NONE'): GET /providers · /xchange · /sources · /context ·          */
+/* /accuracy — same API base and wrappers as every fetcher above.       */
+/* Shapes mirror server/src/xchange/{types,features,evaluation}.ts and   */
+/* server/src/crypto/accuracy.ts; every field the server may omit stays  */
+/* optional so a partial payload degrades to an honest empty state.      */
+/* ------------------------------------------------------------------ */
+
+export type FeedKind = 'WEBSOCKET' | 'REST';
+
+export type ProviderState =
+  | 'DISABLED'
+  | 'CONFIGURED'
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'DEGRADED'
+  | 'DISCONNECTED'
+  | 'UNAVAILABLE'
+  | 'NEEDS_CONFIGURATION';
+
+export interface VenueQuoteView {
+  provider: string; symbol: string; quote: string;
+  bid: number | null; ask: number | null; mid: number | null; last: number | null;
+  spreadBps: number | null; ts: number;
+}
+
+/** One live venue as the registry reports it — CONNECTED is transport only. */
+export interface ProviderSnapshotView {
+  id: string;
+  label: string;
+  feedKind: FeedKind;
+  state: ProviderState;
+  healthy: boolean;
+  connected: boolean;
+  channels: string[];
+  symbols: string[];
+  symbolCount: number;
+  events: number;
+  eventsPerMin: number;
+  lastEventTs: number | null;
+  lastEventAgeMs: number | null;
+  lastAckTs: number | null;
+  reconnects: number;
+  errors: number;
+  lastError: string | null;
+  latency: { p50: number | null; p95: number | null; samples: number };
+  book: Array<{ symbol: string; levels: number; valid: boolean; ageMs: number | null }>;
+  quotes: VenueQuoteView[];
+  note: string | null;
+}
+
+/** Lower-frequency REST research source (DEX Screener / GeckoTerminal / CoinGecko). */
+export interface ContextSourceView {
+  id: string;
+  label: string;
+  feedKind: FeedKind;
+  state: ProviderState;
+  healthy: boolean;
+  requests: number;
+  budget: { limit: number; used: number; resetsAt: number | null };
+  lastFetchTs: number | null;
+  lastFetchAgeMs: number | null;
+  cacheEntries: number;
+  lastError: string | null;
+  note: string | null;
+}
+
+export interface ProvidersResponse {
+  ok: boolean;
+  executionMode?: string;
+  decisionImpact?: string;
+  generatedAt?: number;
+  exchanges?: ProviderSnapshotView[];
+  context?: ContextSourceView[];
+  /** venues with an adapter design but NOT wired — rendered as NOT WIRED */
+  pending?: string[];
+  /** the production feed, reported in the same shape */
+  reference?: ProviderSnapshotView | null;
+}
+
+export interface VenueWindowView {
+  provider: string; symbol: string; quote: string; samples: number;
+  firstTs: number; lastTs: number; lastMid: number | null; spreadBps: number | null;
+  imbalance: number | null; returnPct: number | null; trades: number;
+  takerBuyPct: number | null; fresh: boolean;
+}
+
+export interface AgreementView {
+  symbol: string; quoteGroup: 'USD' | 'STABLE'; venues: number; freshVenues: number;
+  agreement: number | null; majority: 'UP' | 'DOWN' | 'FLAT' | null;
+  reference: string; referenceAgrees: boolean | null; divergenceBps: number | null;
+  samples: number; sufficient: boolean;
+}
+
+export interface LeadLagView {
+  provider: string; lagSamples: number;
+  corrLag0: number | null; corrBestLag: number | null; bestLag: number | null;
+  n: number; sufficient: boolean;
+}
+
+export interface ConfidenceView {
+  score: number | null;
+  sufficient: boolean;
+  parts: Record<string, number | null>;
+}
+
+export interface XchangeFeaturesView {
+  symbol: string;
+  generatedAt: number;
+  windowMs: number;
+  venues: VenueWindowView[];
+  agreement: AgreementView[];
+  pressure: Array<{ provider: string; trades: number; takerBuyPct: number | null; fresh: boolean }>;
+  leadLag: LeadLagView[];
+  confidence: ConfidenceView;
+}
+
+export interface XchangeResponse {
+  ok: boolean;
+  /** false → the layer is off; features is then absent, never invented */
+  enabled: boolean;
+  symbol?: string;
+  windowMs?: number;
+  generatedAt?: number;
+  monitors?: string[];
+  quote?: string;
+  sampleCount?: number;
+  features?: XchangeFeaturesView | null;
+  note?: string;
+}
+
+/** One evaluated model: metrics are PERCENTAGES except `brier` (0..1). */
+export interface SourceModelMetrics {
+  n: number;
+  accuracyPct: number | null;
+  balancedAccuracyPct: number | null;
+  brier: number | null;
+  calibration: Array<{ bucket: string; predictedPct: number; observedPct: number; n: number }>;
+  netEdgeAfterCostPct: number | null;
+  signalsTaken: number;
+  correctSignals: number;
+}
+
+export interface SourceHorizonView {
+  horizon: string;
+  horizonMs: number;
+  status: 'OK' | 'INSUFFICIENT_DATA';
+  trainRows: number;
+  testRows: number;
+  folds: number;
+  baseline: SourceModelMetrics;
+  krakenOnly: SourceModelMetrics;
+  krakenPlusCoinbase: SourceModelMetrics;
+  incremental: {
+    balancedAccuracyDeltaPct: number | null;
+    brierDelta: number | null;
+    netEdgeDeltaPct: number | null;
+  };
+  featureRedundancyR: number | null;
+  note: string;
+}
+
+export interface SourcesResponse {
+  ok: boolean;
+  symbol?: string;
+  generatedAt?: number;
+  windowMs?: number;
+  providers?: Array<{ provider: string; samples: number; lastTs: number | null; ageMs: number | null }>;
+  freshness?: Array<{ provider: string; symbol: string; ageMs: number | null; fresh: boolean }>;
+  horizons?: SourceHorizonView[];
+  status?: 'OK' | 'INSUFFICIENT_DATA' | 'NO_DATA';
+  note?: string;
+}
+
+export interface ContextResponse {
+  ok: boolean;
+  enabled: boolean;
+  generatedAt?: number;
+  sources?: ContextSourceView[];
+  cacheEntries?: number;
+  data?: Record<string, { ts: number; payload: unknown } | null>;
+  note?: string;
+}
+
+/** Fixed-horizon accuracy: `pct` fields are FRACTIONS (0..1). */
+export interface AccuracySideView { n: number; correct: number; pct: number | null }
+
+export interface AccuracyHorizonView {
+  key: string;
+  source: string;
+  horizonMs: number;
+  elapsed: number;
+  evaluated: number;
+  flat: number;
+  noData: number;
+  accuracy: { BUY: AccuracySideView; SELL: AccuracySideView; overall: AccuracySideView };
+  classBalance: { up: number; down: number; upPct: number | null };
+  baselines: {
+    alwaysUp: { n: number; pct: number | null };
+    alwaysDown: { n: number; pct: number | null };
+    persistence: { n: number; pct: number | null };
+  };
+}
+
+export interface AccuracyResponse {
+  generatedAt?: number;
+  note?: string;
+  signals?: { total: number; BUY: number; SELL: number };
+  horizons?: AccuracyHorizonView[];
+}
+
+export const getProviders = (): Promise<ProvidersResponse> => get<ProvidersResponse>('/providers');
+
+export const getXchange = (symbol = 'BTC', windowMs = 3_600_000): Promise<XchangeResponse> =>
+  get<XchangeResponse>(`/xchange?symbol=${encodeURIComponent(symbol)}&window=${windowMs}`);
+
+export const getSources = (symbol = 'BTC'): Promise<SourcesResponse> =>
+  get<SourcesResponse>(`/sources?symbol=${encodeURIComponent(symbol)}`);
+
+export const getContext = (): Promise<ContextResponse> => get<ContextResponse>('/context');
+
+export const getAccuracy = (): Promise<AccuracyResponse> => get<AccuracyResponse>('/accuracy');
