@@ -81,10 +81,14 @@ services:
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"
-      # Exit geometry: target = price + 3*ATR14 instead of the next resistance
-      # (S/R targets sat inside the 1.5R floor and were discarded: 714 -> 97
-      # sane-gate rejects; +$3.9k vs -$2.3k net with the fee above).
-      CRYPTO_TARGET_MODE: "atr3"
+      # Exit geometry = APPROVED GEOMETRY C (horizon-matched sigma_H):
+      # stop = 1.0*sigma_H below, target = 2.0*sigma_H above, sigma_H =
+      # ATR/price*sqrt(expectedHold). Walk-forward holdout 59% win / +$15,813
+      # (44 trades) vs 23% / +$840 at the old tight stop that stopped every
+      # closed trade intraday. Positions size down at the same 0.75% risk cap
+      # because each stop is now ~1 vol instead of ~0.25 ATR.
+      # Rollback = set this back to "atr3" (or "sr") and rebuild.
+      CRYPTO_TARGET_MODE: "sigmah"
       # Fusion weights over the six ScoreParts. Crypto fills only technical and
       # regime (fundamental/event/sentiment/macro are hard 0 in v1), so the
       # SHORT defaults leave 46% of the vote on dead parts and their conflict

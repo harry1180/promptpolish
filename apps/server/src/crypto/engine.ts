@@ -24,6 +24,29 @@ import type { CryptoMarketDataProvider } from './providers/types.ts';
 
 export const CRYPTO_STRATEGY = 'crypto_momentum_v1';
 
+/**
+ * APPROVED EXIT GEOMETRY C (horizon-matched), identical to the `C` row of
+ * scripts/alpha-research.mts:
+ *   sigma_H = ATR/price * sqrt(expectedHoldSessions)
+ *   stop    = price * (1 - 1.0*sigma_H)      target = price * (1 + 2.0*sigma_H)
+ * Returns null when the inputs are unusable (caller keeps the strategy's own
+ * stop/target rather than guessing) — no fabricated geometry.
+ */
+export function sigmahGeometry(
+  price: number,
+  atr14: number,
+  expectedHoldSessions: number | null | undefined,
+): { stop: number; target: number; sigmaH: number; stopPct: number; targetPct: number; rr: number } | null {
+  if (!(price > 0) || !(atr14 > 0)) return null;
+  const H = Math.max(1, Number(expectedHoldSessions ?? 5) || 5);
+  const sigmaH = (atr14 / price) * Math.sqrt(H);
+  if (!(sigmaH > 0)) return null;
+  const stop = price * (1 - 1.0 * sigmaH);
+  const target = price * (1 + 2.0 * sigmaH);
+  if (!(stop > 0) || !(target > price)) return null;
+  return { stop, target, sigmaH, stopPct: sigmaH * 100, targetPct: 2 * sigmaH * 100, rr: 2 };
+}
+
 /** Regimes that would block a long entry in equities — recorded for crypto
  *  but NOT gating in v1 (see broker header: no regime table for crypto). */
 const ADVERSE_REGIMES = new Set<Regime>(['BEAR_TREND', 'RISK_OFF', 'LIQUIDITY_STRESS', 'HIGH_VOLATILITY', 'UNCERTAIN']);
@@ -193,11 +216,18 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
     });
     if (st.action === 'INSUFFICIENT_DATA') continue;
 
-    // Exit geometry (CRYPTO_TARGET_MODE=atr3): aim past the next resistance at
-    // price + 3*ATR14. S/R targets routinely sit inside the 1.5R minimum and
-    // were thrown away by the sane-RR gate — measured 714 -> 97 rejections and
-    // net +$3.9k vs -$2.3k over 602d (scripts/crypto-backtest.mts).
-    if (config.targetMode === 'atr3') {
+    // Exit geometry — see config.targetMode. GEOMETRY C (sigmah) rewrites BOTH
+    // the stop and the target: production stops sat ~0.25x ATR below entry
+    // (p(target) 3-8%, p(stop) 91-96% measured on purged train episodes), which
+    // is why every closed trade died intraday.
+    if (config.targetMode === 'sigmah') {
+      const g = sigmahGeometry(quote.price, Number(st.factors.atr ?? 0), st.expectedHoldSessions);
+      if (g) { st.invalidation = g.stop; st.target = g.target; }
+    } else if (config.targetMode === 'atr3') {
+      // aim past the next resistance at price + 3*ATR14. S/R targets routinely
+      // sit inside the 1.5R minimum and were thrown away by the sane-RR gate —
+      // measured 714 -> 97 rejections and net +$3.9k vs -$2.3k over 602d
+      // (scripts/crypto-backtest.mts).
       const atr14 = Number(st.factors.atr ?? 0);
       if (atr14 > 0 && quote.price + 3 * atr14 > st.target) {
         st.target = quote.price + 3 * atr14;

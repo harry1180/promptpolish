@@ -95,12 +95,18 @@ export interface CryptoConfig {
   minRiskReward: number;
   minSignalConfidence: number;
   /**
-   * Exit geometry for new entries. `sr` (production default) aims at the next
-   * resistance above price; `atr3` aims at price + 3*ATR14, which backtested
-   * at +$3.9k vs -$2.3k over 602d because most S/R targets sit inside the
-   * 1.5R minimum and were discarded by the sane-RR gate (714 -> 97 rejects).
+   * Exit geometry for new entries. `sr` aims at the next resistance above
+   * price; `atr3` aims at price + 3*ATR14 (+$3.9k vs -$2.3k over 602d, most
+   * S/R targets sat inside the 1.5R floor); `sigmah` is APPROVED GEOMETRY C —
+   * horizon-matched: sigma_H = ATR/price * sqrt(expectedHold), stop 1.0*sigma_H
+   * below, target 2.0*sigma_H above. Selected by the alpha-research
+   * walk-forward (holdout +$15,813 / 44 trades / 59% win, Wilson [44.4,72.3])
+   * over production geometry, whose stops sat at ~0.25x ATR and produced
+   * p(target)=3-8% / p(stop)=91-96%. Risks ~1 sigma_H per trade instead of
+   * ~0.5%, so risk-based sizing makes SMALLER positions at the same 0.75%
+   * risk cap. Rollback: set CRYPTO_TARGET_MODE back to atr3.
    */
-  targetMode: 'sr' | 'atr3';
+  targetMode: 'sr' | 'atr3' | 'sigmah';
   reentryCooldownSessions: number;
   stopAtrMultiple: number;
   maxHoldSessions: number;
@@ -199,7 +205,9 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
     feePct: num(env.CRYPTO_FEE_PCT, 0.0025),
     minRiskReward: num(env.CRYPTO_MIN_RISK_REWARD, 1.5),
     minSignalConfidence: Math.min(num(env.CRYPTO_MIN_SIGNAL_CONFIDENCE, 0.7), 1),
-    targetMode: env.CRYPTO_TARGET_MODE === 'atr3' ? 'atr3' : 'sr',
+    targetMode: env.CRYPTO_TARGET_MODE === 'atr3' || env.CRYPTO_TARGET_MODE === 'sigmah'
+      ? env.CRYPTO_TARGET_MODE
+      : 'sr',
     reentryCooldownSessions: Math.min(num(env.CRYPTO_REENTRY_COOLDOWN, 1), 30),
     stopAtrMultiple: Math.min(num(env.CRYPTO_STOP_ATR_MULTIPLE, 2), 5),
     maxHoldSessions: num(env.CRYPTO_MAX_HOLD, 20),
