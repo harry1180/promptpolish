@@ -1,0 +1,18 @@
+{
+  "name": "@promptslim/act",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Control Tower core — deterministic governance engine (policy, score, blast radius, modality, delegation, evidence model, demo scenarios). DOM-free and network-free.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@promptslim/governance": "workspace:*",
+    "@promptslim/shared-types": "workspace:*"
+  }
+}

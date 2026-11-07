@@ -175,6 +175,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@promptslim/act':
+        specifier: workspace:*
+        version: link:../../packages/act
       '@promptslim/analytics':
         specifier: workspace:*
         version: link:../../packages/analytics
@@ -196,13 +199,25 @@ importers:
       '@promptslim/token-counter':
         specifier: workspace:*
         version: link:../../packages/token-counter
+      '@promptslim/tucore':
+        specifier: workspace:*
+        version: link:../../packages/tucore
+      ws:
+        specifier: ^8.22.1
+        version: 8.22.1
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.4
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
 
   apps/web:
     dependencies:
+      '@promptslim/act':
+        specifier: workspace:*
+        version: link:../../packages/act
       '@promptslim/analytics':
         specifier: workspace:*
         version: link:../../packages/analytics
@@ -233,6 +248,9 @@ importers:
       '@promptslim/token-counter':
         specifier: workspace:*
         version: link:../../packages/token-counter
+      '@promptslim/tucore':
+        specifier: workspace:*
+        version: link:../../packages/tucore
       react:
         specifier: ^19.1.1
         version: 19.3.0
@@ -273,6 +291,15 @@ importers:
       vitest:
         specifier: ^5.0.0
         version: 5.0.0(@types/node@24.13.4)(jsdom@30.0.1)(vite@7.3.6(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0))
+
+  packages/act:
+    dependencies:
+      '@promptslim/governance':
+        specifier: workspace:*
+        version: link:../governance
+      '@promptslim/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
 
   packages/analytics:
     dependencies:
@@ -347,6 +374,8 @@ importers:
       '@promptslim/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+
+  packages/tucore: {}
 
 packages:
 
@@ -961,6 +990,9 @@ packages:
 
   '@types/react@19.3.0':
     resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@vitejs/plugin-react@5.2.0':
     resolution: {integrity: sha512-YmKkfhOAi3wsB1PhJq5Scj3GXMn3WvtQ/JC0xoopuHoXSdmtdStOpFrYaT1kie2YgFBcIe64ROzMYRjCrYOdYw==}
@@ -1610,6 +1642,18 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  ws@8.22.1:
+    resolution: {integrity: sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xml-name-validator@5.0.0:
     resolution: {integrity: sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==}
     engines: {node: '>=18'}
@@ -2090,6 +2134,10 @@ snapshots:
   '@types/react@19.3.0':
     dependencies:
       csstype: 3.2.3
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.13.4
 
   '@vitejs/plugin-react@5.2.0(vite@7.3.6(@types/node@24.13.4)(jiti@2.7.0)(lightningcss@1.32.0))':
     dependencies:
@@ -2692,6 +2740,8 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  ws@8.22.1: {}
 
   xml-name-validator@5.0.0: {}
 

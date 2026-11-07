@@ -56,6 +56,52 @@ pnpm typecheck    # tsc strict, whole workspace
 pnpm build        # production bundle → apps/web/dist
 ```
 
+### Deploying on a shared edge
+
+```bash
+docker compose up -d    # builds apps/web + apps/server, no raw ports published
+```
+
+`web` is the static bundle behind nginx; `server` is Node 24 running the
+TypeScript sources directly (prod deps only). Both are exposed through the
+host's existing Traefik proxy — nothing else is touched:
+
+| Path on the edge | Routed to (priority) |
+|---|---|
+| `/`, `/index.html`, `/assets/*` | `web` (60) |
+| `/pp/api/*` | `server`, with `/pp` stripped (61) |
+
+The bundle is built with `VITE_API_BASE=/pp` because on a shared host `/api`
+already belongs to another app; `pnpm dev` leaves it unset, so local dev keeps
+the plain relative `/api` that vite proxies to `:8787`. Server state (SQLite db
++ generated `master.key`) lives in the `pp-data` volume; `PP_COOKIE_SECURE=1`
+since TLS terminates at the proxy.
+
+## Agent Control Tower
+
+`/agent-control-tower` — enterprise multimodal AI agent governance control plane
+(same product, two operating modes, **separate trust boundaries**):
+
+- **DEMO MODE** (default here): 27 synthetic agents, deterministic scenario
+  orchestration for a conference, its own database (`act-demo.db`), its own
+  synthetic credentials, `DEMO ENVIRONMENT — Synthetic data — no real transactions`
+  banner, and a **RESET DEMO** that can never touch production.
+- **PRODUCTION MODE**: enabled only by server configuration + tenant entitlement
+  (`ACT_PROD_ENABLED=1` **and** `ACT_PROD_ENTITLED=1`), backed by a separate
+  `act-prod.db`, with an empty registry until real connectors register agents.
+
+Core mechanics live in `packages/act` (deterministic policy gateway — no model
+authorizes its own action, fail-closed by default, blast-radius enforcement,
+delegation narrowing, modality governance, 11-component governance score,
+hash-chained evidence, FSB/MAS/NIST/ISO/OWASP control mapping). HTTP contract:
+`docs/ACT-API.md`; architecture, threat model, readiness: docs/AGENT-CONTROL-TOWER.md;
+conference script: `docs/ACT-DEMO-GUIDE.md`.
+
+```bash
+pnpm --filter @promptslim/act test      # 47 engine tests
+pnpm --filter @promptslim/server test   # + 12 ACT integration tests (29 total)
+```
+
 ## Where things live
 
 | Path | What |
@@ -104,3 +150,18 @@ Full design, data flows, and decision records: **`docs/ARCHITECTURE.md`**.
   outbound-call policy.
 
 MIT-style MVP. See `docs/ARCHITECTURE.md` for internals and trade-offs.
+
+## TradingUSA — market intelligence & paper trading
+
+`/tradingusa` (API `/pp/api/tradingusa/*`) is a **PAPER-TRADING ONLY** module
+inside this app: virtual $100K short-term + $100K long-term portfolios,
+local quant strategies + signal fusion + risk engine, public-information
+pipeline (SEC EDGAR, RSS, Treasury), and a selective Groq/Gemini reasoning
+layer behind a single `InferenceRouter` (LLM value router, quotas + reserve,
+circuit breakers, response cache, usage ledger, ablation tracking). No real
+money, no brokerage connectivity — `ExecutionGuard` hard-codes
+`EXECUTION_MODE=PAPER_ONLY`.
+
+- Architecture + Phase-0 findings: `docs/TRADINGUSA-ARCHITECTURE.md`
+- API contract: `docs/TRADINGUSA-API.md`
+- Operations, env vars, failure modes: `docs/TRADINGUSA-OPERATIONS.md`

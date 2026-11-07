@@ -10,15 +10,19 @@
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
+    "@promptslim/act": "workspace:*",
     "@promptslim/analytics": "workspace:*",
     "@promptslim/governance": "workspace:*",
     "@promptslim/llm-connect": "workspace:*",
     "@promptslim/model-config": "workspace:*",
     "@promptslim/pricing-engine": "workspace:*",
     "@promptslim/shared-types": "workspace:*",
-    "@promptslim/token-counter": "workspace:*"
+    "@promptslim/token-counter": "workspace:*",
+    "@promptslim/tucore": "workspace:*",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.2"
   }
 }

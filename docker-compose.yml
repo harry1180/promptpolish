@@ -65,6 +65,13 @@ services:
       # Crypto spot book (paper only, long-only, 24/7 scheduler)
       CRYPTO_DB: /data/crypto.db
       CRYPTO_WORKERS: "1"
+      # Microstructure Alpha Engine — SHADOW ONLY (docs/CRYPTO-MICRO.md):
+      # computes/records micro features from the SAME Kraken WS connection
+      # (adds a `trade` subscription on it); decision impact is NONE and
+      # SHADOW_MODE stays on. Set to "0" to remove the observer entirely.
+      SCALPING_ALPHA_ENABLED: "1"
+      SHADOW_MODE: "1"
+      LIVE_EXECUTION_ENABLED: "0"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"
@@ -72,6 +79,25 @@ services:
       # (S/R targets sat inside the 1.5R floor and were discarded: 714 -> 97
       # sane-gate rejects; +$3.9k vs -$2.3k net with the fee above).
       CRYPTO_TARGET_MODE: "atr3"
+      # Fusion weights over the six ScoreParts. Crypto fills only technical and
+      # regime (fundamental/event/sentiment/macro are hard 0 in v1), so the
+      # SHORT defaults leave 46% of the vote on dead parts and their conflict
+      # rule turned technical >= +0.5 in a bear regime into
+      # CONFLICTING_SIGNAL — 1,186 coin-days inside the 368-day BUY drought
+      # (scripts/crypto-blockers.mts), incl. 6 of 25 coins today. Backtest
+      # prod_wts: 204 fills / net +$3.9k over 604d vs 183 / +$3.9k defaults.
+      CRYPTO_FUSION_WEIGHTS: '{"technical": 0.84, "regime": 0.16}'
+      # Conviction floor on fused BUY confidence. At 0.70 a BUY is
+      # UNREACHABLE while the strategy layer returns WATCH — fused conf =
+      # hint 0.60 x (0.7+0.3*0.52) = 0.514 max — and the BTC regime veto
+      # forces WATCH all through a bear tape (368 consecutive days, zero
+      # BUY since 2025-11-02). 0.50 lets through setups that already passed
+      # fusion (weighted >= 0.30, hint >= 0.55), the sane R:R gate and risk
+      # sizing: backtest over 604d = 498 fills / 23.1% win / net +$840 /
+      # maxDD 17.0% vs 183 fills / 26.2% / +$3,925 / 14.5% at 0.70 — three
+      # times the activity for a thinner edge, and >=10 closed outcomes
+      # finally lets MIN_TRADES refit the fusion weights.
+      CRYPTO_MIN_SIGNAL_CONFIDENCE: "0.5"
       PILOT_MODE: "true"
       # Model IDs discovered live from each provider's /models endpoint
       # (retired IDs return 404; override here without touching code):

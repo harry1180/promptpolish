@@ -7,6 +7,12 @@ import {
 } from './auth.ts';
 import { KeyVault } from './keys.ts';
 import { handleChat } from './chat.ts';
+import { handleAct } from './act/routes.ts';
+import { TradingRuntime } from './tradingusa/runtime.ts';
+import { handleTradingusa } from './tradingusa/routes.ts';
+import { CryptoRuntime } from './crypto/runtime.ts';
+import { handleCrypto } from './crypto/routes.ts';
+import { ActStack, actConfigFromEnv } from './act/store.ts';
 import {
   buildAggregate, validateFilters, validateTags,
 } from '@promptslim/analytics';
@@ -129,18 +135,74 @@ export interface AppOptions {
   fetchImpl?: typeof fetch;
   /** where the master key file lives (":memory:" keeps vault keys process-only, for tests) */
   dbPath?: string;
+  /** Agent Control Tower stack (demo + production stores). Defaults to env config. */
+  actStack?: ActStack;
+  /** TradingUSA DB path (":memory:" keeps tests side-effect free). Default: env TU_DB, else data/tradingusa.db only in the real entrypoint. */
+  tuDbPath?: string;
+  /** Start the TradingUSA scheduler (env TU_WORKERS=1 in production). */
+  tuWorkers?: boolean;
+  /** injected provider fetch for TradingUSA network jobs (tests) */
+  tuFetchImpl?: typeof fetch;
+  /** Crypto book: separate DB file + own 24/7 scheduler */
+  cryptoDbPath?: string;
+  cryptoWorkers?: boolean;
 }
 
 export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<typeof createServer> {
   const secure = process.env.PP_COOKIE_SECURE === '1';
   const vault = new KeyVault(db, opts.dbPath ?? DB_PATH);
+  const actStack = opts.actStack ?? new ActStack(actConfigFromEnv(), 'demo-synthetic-001');
 
-  return createServer(async (req, res) => {
+  /* TradingUSA: separate DB file (never promptpolice.db), own providers,
+   * own scheduler. In tests (non-entrypoint) it defaults to :memory: and
+   * workers stay off unless explicitly enabled. */
+  const tuRuntime = new TradingRuntime({
+    dbPath: opts.tuDbPath
+      ?? process.env.TU_DB
+      ?? (isMainModule(import.meta.url, process.argv[1]) ? 'data/tradingusa.db' : ':memory:'),
+    workers: opts.tuWorkers ?? process.env.TU_WORKERS === '1',
+    ...(opts.tuFetchImpl ? { fetchImpl: opts.tuFetchImpl } : {}),
+  });
+  tuRuntime.start();
+
+  /* Crypto book: separate DB (never promptpolice.db, never tradingusa.db),
+   * Kraken provider + websocket, workers only under CRYPTO_WORKERS=1. */
+  const cryptoRuntime = new CryptoRuntime({
+    dbPath: opts.cryptoDbPath
+      ?? process.env.CRYPTO_DB
+      ?? (isMainModule(import.meta.url, process.argv[1]) ? 'data/crypto.db' : ':memory:'),
+    workers: opts.cryptoWorkers ?? process.env.CRYPTO_WORKERS === '1',
+  });
+  cryptoRuntime.start();
+
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
     const ip = req.socket.remoteAddress ?? '?';
     let user: UserRow | null = null;
     let token: string | null = null;
+
+    /* ---------------- Agent Control Tower (demo/production trust boundary) ---------------- */
+    if (path.startsWith('/api/act/')) {
+      const handled = await handleAct(req, res, path, { stack: actStack, readBody, json });
+      if (handled) return;
+    }
+
+    /* ---------------- TradingUSA (market intelligence + paper trading) ---------------- */
+    if (path.startsWith('/api/tradingusa/')) {
+      const handled = await handleTradingusa(req, res, path, {
+        runtime: tuRuntime, readBody, json,
+      });
+      if (handled) return;
+    }
+
+    /* ---------------- Crypto (24/7 spot paper book) ---------------- */
+    if (path.startsWith('/api/crypto/')) {
+      const handled = await handleCrypto(req, res, path, {
+        runtime: cryptoRuntime, readBody, json,
+      });
+      if (handled) return;
+    }
 
     try {
       const uid = (() => {
@@ -314,6 +376,9 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
       });
     }
   });
+
+  server.on('close', () => tuRuntime.stop());
+  return server;
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {

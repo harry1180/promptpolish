@@ -5,7 +5,15 @@ import type {
 
 /** Thin typed client for the org server (apps/server). Same-origin /api —
  *  vite proxies it to :8787 in dev. All calls send HttpOnly cookies, no tokens
- *  in JS (nothing to leak from a compromised render path). */
+ *  in JS (nothing to leak from a compromised render path).
+ *
+ *  Deployment note: when this bundle is served from a host whose /api is
+ *  already claimed by another app (the shared Traefik edge), the build sets
+ *  VITE_API_BASE=/pp so requests land on /pp/api/* and a stripprefix
+ *  middleware restores /api before they reach apps/server. Unset (dev,
+ *  tests) keeps the plain relative /api. */
+
+const API_BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
 
 export interface ApiResult<T> {
   ok: boolean;
@@ -16,7 +24,7 @@ export interface ApiResult<T> {
 
 async function call<T>(path: string, method: string, body?: unknown): Promise<ApiResult<T>> {
   try {
-    const res = await fetch(path, {
+    const res = await fetch(API_BASE + path, {
       method,
       headers: body !== undefined ? { 'content-type': 'application/json' } : {},
       body: body === undefined ? undefined : JSON.stringify(body),

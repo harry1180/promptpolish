@@ -1,0 +1,400 @@
+{
+ "msgs": 47,
+ "ticker": [
+  {
+   "channel": "ticker",
+   "type": "snapshot",
+   "data": [
+    {
+     "symbol": "BTC/USD",
+     "bid": 75941.1,
+     "bid_qty": 1.81136286,
+     "ask": 75941.2,
+     "ask_qty": 2.15548717,
+     "last": 75941.2,
+     "volume": 2254.92552225,
+     "vwap": 75669.8,
+     "low": 74790,
+     "high": 76258.1,
+     "change": -83.5,
+     "change_pct": -0.11,
+     "trades": 149533,
+     "timestamp": "2026-11-07T02:43:55.368307Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "snapshot",
+   "data": [
+    {
+     "symbol": "XRP/USD",
+     "bid": 1.16794,
+     "bid_qty": 2854.0380771,
+     "ask": 1.16807,
+     "ask_qty": 4280.58238107,
+     "last": 1.16782,
+     "volume": 28033763.64433321,
+     "vwap": 1.18565,
+     "low": 1.16599,
+     "high": 1.218,
+     "change": -0.04767,
+     "change_pct": -3.92,
+     "trades": 33343,
+     "timestamp": "2026-11-07T02:43:56.144941Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "snapshot",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "bid": 2243.84,
+     "bid_qty": 6.0438097,
+     "ask": 2243.85,
+     "ask_qty": 2.24783878,
+     "last": 2243.85,
+     "volume": 31749.01821743,
+     "vwap": 2228.65,
+     "low": 2201.26,
+     "high": 2250.6,
+     "change": 6.22,
+     "change_pct": 0.28,
+     "trades": 41977,
+     "timestamp": "2026-11-07T02:43:42.093178Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "XRP/USD",
+     "bid": 1.16794,
+     "bid_qty": 2854.0380771,
+     "ask": 1.16807,
+     "ask_qty": 4280.58238107,
+     "last": 1.16794,
+     "volume": 28033793.19411821,
+     "vwap": 1.18565,
+     "low": 1.16599,
+     "high": 1.218,
+     "change": -0.04755,
+     "change_pct": -3.91,
+     "trades": 33344,
+     "timestamp": "2026-11-07T02:43:57.140044Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "bid": 2243.84,
+     "bid_qty": 6.0438097,
+     "ask": 2243.85,
+     "ask_qty": 2.24783878,
+     "last": 2243.84,
+     "volume": 31749.06859821,
+     "vwap": 2228.65,
+     "low": 2201.26,
+     "high": 2250.6,
+     "change": 6.21,
+     "change_pct": 0.28,
+     "trades": 41978,
+     "timestamp": "2026-11-07T02:43:57.652708Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "bid": 2243.84,
+     "bid_qty": 10.23135496,
+     "ask": 2243.85,
+     "ask_qty": 2.24783878,
+     "last": 2243.84,
+     "volume": 31749.07002798,
+     "vwap": 2228.65,
+     "low": 2201.26,
+     "high": 2250.6,
+     "change": 6.21,
+     "change_pct": 0.28,
+     "trades": 41979,
+     "timestamp": "2026-11-07T02:44:00.783705Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "XRP/USD",
+     "bid": 1.16777,
+     "bid_qty": 1555.1704099,
+     "ask": 1.16793,
+     "ask_qty": 1707.15504702,
+     "last": 1.16777,
+     "volume": 28034479.33031821,
+     "vwap": 1.18565,
+     "low": 1.16599,
+     "high": 1.218,
+     "change": -0.04772,
+     "change_pct": -3.93,
+     "trades": 33345,
+     "timestamp": "2026-11-07T02:44:03.092049Z"
+    }
+   ]
+  },
+  {
+   "channel": "ticker",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "BTC/USD",
+     "bid": 75941.1,
+     "bid_qty": 1.93545422,
+     "ask": 75941.2,
+     "ask_qty": 2.15666063,
+     "last": 75941.1,
+     "volume": 2254.92477897,
+     "vwap": 75669.8,
+     "low": 74790,
+     "high": 76258.1,
+     "change": -83.8,
+     "change_pct": -0.11,
+     "trades": 149530,
+     "timestamp": "2026-11-07T02:44:03.536687Z"
+    }
+   ]
+  }
+ ],
+ "trade": [
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "side": "sell",
+     "price": 2243.84,
+     "qty": 0.05038078,
+     "ord_type": "limit",
+     "trade_id": 68855224,
+     "timestamp": "2026-11-07T02:43:57.652708Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "side": "sell",
+     "price": 2243.84,
+     "qty": 0.00142977,
+     "ord_type": "limit",
+     "trade_id": 68855225,
+     "timestamp": "2026-11-07T02:44:00.783705Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.00016051,
+     "ord_type": "limit",
+     "trade_id": 114691384,
+     "timestamp": "2026-11-07T02:44:03.536687Z"
+    },
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.00007944,
+     "ord_type": "limit",
+     "trade_id": 114691385,
+     "timestamp": "2026-11-07T02:44:03.536687Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "side": "buy",
+     "price": 2243.85,
+     "qty": 0.01465142,
+     "ord_type": "limit",
+     "trade_id": 68855226,
+     "timestamp": "2026-11-07T02:44:03.568357Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "side": "sell",
+     "price": 2243.84,
+     "qty": 0.00405152,
+     "ord_type": "limit",
+     "trade_id": 68855227,
+     "timestamp": "2026-11-07T02:44:06.314781Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.00002056,
+     "ord_type": "limit",
+     "trade_id": 114691386,
+     "timestamp": "2026-11-07T02:44:09.377964Z"
+    },
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.0263362,
+     "ord_type": "limit",
+     "trade_id": 114691387,
+     "timestamp": "2026-11-07T02:44:09.377964Z"
+    },
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.02418002,
+     "ord_type": "limit",
+     "trade_id": 114691388,
+     "timestamp": "2026-11-07T02:44:09.377964Z"
+    },
+    {
+     "symbol": "BTC/USD",
+     "side": "sell",
+     "price": 75941.1,
+     "qty": 0.00351334,
+     "ord_type": "limit",
+     "trade_id": 114691389,
+     "timestamp": "2026-11-07T02:44:09.377964Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "ETH/USD",
+     "side": "buy",
+     "price": 2243.85,
+     "qty": 0.05626062,
+     "ord_type": "limit",
+     "trade_id": 68855228,
+     "timestamp": "2026-11-07T02:44:12.450699Z"
+    }
+   ]
+  },
+  {
+   "channel": "trade",
+   "type": "update",
+   "data": [
+    {
+     "symbol": "BTC/USD",
+     "side": "buy",
+     "price": 75941.2,
+     "qty": 0.00526723,
+     "ord_type": "market",
+     "trade_id": 114691390,
+     "timestamp": "2026-11-07T02:44:13.686263Z"
+    }
+   ]
+  }
+ ],
+ "subs": [
+  {
+   "method": "subscribe",
+   "result": {
+    "channel": "ticker",
+    "event_trigger": "trades",
+    "snapshot": true,
+    "symbol": "BTC/USD"
+   },
+   "success": true,
+   "time_in": "2026-11-07T02:43:56.835845Z",
+   "time_out": "2026-11-07T02:43:56.835912Z"
+  },
+  {
+   "method": "subscribe",
+   "result": {
+    "channel": "ticker",
+    "event_trigger": "trades",
+    "snapshot": true,
+    "symbol": "ETH/USD"
+   },
+   "success": true,
+   "time_in": "2026-11-07T02:43:56.835845Z",
+   "time_out": "2026-11-07T02:43:56.835912Z"
+  },
+  {
+   "method": "subscribe",
+   "result": {
+    "channel": "ticker",
+    "event_trigger": "trades",
+    "snapshot": true,
+    "symbol": "XRP/USD"
+   },
+   "success": true,
+   "time_in": "2026-11-07T02:43:56.835845Z",
+   "time_out": "2026-11-07T02:43:56.835912Z"
+  },
+  {
+   "method": "subscribe",
+   "result": {
+    "channel": "trade",
+    "snapshot": false,
+    "symbol": "BTC/USD"
+   },
+   "success": true,
+   "time_in": "2026-11-07T02:43:56.836622Z",
+   "time_out": "2026-11-07T02:43:56.836639Z"
+  },
+  {
+   "method": "subscribe",
+   "result": {
+    "channel": "trade",
+    "snapshot": false,
+    "symbol": "ETH/USD"
+   },
+   "success": true,
+   "time_in": "2026-11-07T02:43:56.836622Z",
+   "time_out": "2026-11-07T02:43:56.836639Z"
+  }
+ ],
+ "errors": []
+}

@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@promptslim/act": "workspace:*",
     "@promptslim/analytics": "workspace:*",
     "@promptslim/cache": "workspace:*",
     "@promptslim/governance": "workspace:*",
@@ -21,6 +22,7 @@
     "@promptslim/shared": "workspace:*",
     "@promptslim/shared-types": "workspace:*",
     "@promptslim/token-counter": "workspace:*",
+    "@promptslim/tucore": "workspace:*",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
