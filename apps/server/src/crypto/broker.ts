@@ -19,6 +19,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { checkExit, etDate } from '@promptslim/tucore';
 import type { ExitReason, Quote } from '@promptslim/tucore';
 import type { CryptoConfig } from './config.ts';
+import { validateEntryGeometry } from './guard.ts';
 import type { CryptoMarketDataProvider } from './providers/types.ts';
 
 export const CRYPTO_BENCHMARK = 'BTC';
@@ -195,12 +196,13 @@ export async function processOrders(
   const summary: FillSummary = { filled: 0, pending: 0, closed: 0 };
   const orders = db
     .prepare(
-      `SELECT id, portfolio, signal_id, ticker, side, qty, limit_price, fill_mode
+      `SELECT id, portfolio, signal_id, ticker, side, qty, limit_price, stop_price, fill_mode
          FROM paper_orders WHERE status = 'PENDING' ORDER BY id`,
     )
     .all() as unknown as Array<{
       id: number; portfolio: string; signal_id: number | null; ticker: string;
-      side: 'BUY' | 'SELL'; qty: number; limit_price: number | null; fill_mode: string;
+      side: 'BUY' | 'SELL'; qty: number; limit_price: number | null;
+      stop_price: number | null; fill_mode: string;
     }>;
   if (orders.length === 0) return summary;
 
@@ -228,6 +230,30 @@ export async function processOrders(
       feePct: config.feePct, liquidityScore: liquidityOf(db, order.ticker),
     });
     if (!fill.filled) { summary.pending += 1; continue; }
+
+    // Entry/stop geometry guard, fill-time layer (approved correction item 1):
+    // a BUY fill that lands below stop + buffer would open a position that is
+    // already invalidated — reject it here with a reason code, before any
+    // position exists. No clamping, no stop changes; the flag is the rollback.
+    if (
+      config.entryStopGuard && order.side === 'BUY' &&
+      order.stop_price != null && order.stop_price > 0
+    ) {
+      const verdict = validateEntryGeometry({
+        side: 'BUY', executablePrice: fill.price,
+        invalidation: order.stop_price, bufferPct: config.entryStopBufferPct,
+      });
+      if (!verdict.ok) {
+        db.prepare(`UPDATE paper_orders SET status = 'REJECTED', filled_at = ?, fill_note = ? WHERE id = ?`)
+          .run(now, `${verdict.code}: ${verdict.detail ?? ''}`, order.id);
+        db.prepare('INSERT INTO audit_log (ts, action, entity, entity_id, detail_json) VALUES (?, ?, ?, ?, ?)')
+          .run(now, 'order_rejected', 'order', String(order.id), JSON.stringify({
+            code: verdict.code, ticker: order.ticker, fillPrice: fill.price,
+            stop: order.stop_price, bufferPct: config.entryStopBufferPct, detail: verdict.detail,
+          }));
+        continue;
+      }
+    }
 
     if (order.side === 'BUY') {
       const cash = getCash(db);

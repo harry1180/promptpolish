@@ -53,11 +53,14 @@ function insertSignal(db: ReturnType<typeof openCryptoDb>, sessionDate: string):
   return Number(res.lastInsertRowid);
 }
 
-function insertPendingOrder(db: ReturnType<typeof openCryptoDb>, signalId: number, qty: number, limit: number): number {
+function insertPendingOrder(db: ReturnType<typeof openCryptoDb>, signalId: number, qty: number, limit: number, stop: number): number {
+  // stop = the signal's invalidation (what production stores in stop_price);
+  // it must sit BELOW the expected fill or the entry-geometry guard rejects
+  // the order as structurally invalid — which is correct behavior.
   const res = db.prepare(
     `INSERT INTO paper_orders (portfolio, signal_id, ticker, side, qty, limit_price, stop_price, status, fill_mode, created_at)
      VALUES (?,?,?,?,?,?,?,'PENDING','AT_SIGNAL',?)`,
-  ).run(CRYPTO_PORTFOLIO, signalId, 'BTC', 'BUY', qty, limit, limit * 0.94, Date.now());
+  ).run(CRYPTO_PORTFOLIO, signalId, 'BTC', 'BUY', qty, limit, stop, Date.now());
   return Number(res.lastInsertRowid);
 }
 
@@ -104,7 +107,7 @@ test('a round trip is fee-inclusive and the learning loop sees it', async () => 
     }
 
     const signalId = insertSignal(db, new Date().toISOString().slice(0, 10));
-    insertPendingOrder(db, signalId, 10, 120); // limit above price -> fills
+    insertPendingOrder(db, signalId, 10, 120, 95); // limit above price, stop = signal invalidation (95) below the fill
 
     const provider = stubProvider([{ symbol: 'BTC', price: 100, prevClose: 99, ts: Date.now(), bid: 99.9, ask: 100.1, provider: 'kraken', freshness: 'REALTIME' }]);
     const summary = await processOrders(db, provider, config);

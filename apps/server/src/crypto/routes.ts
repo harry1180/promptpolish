@@ -14,6 +14,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { FUSION_WEIGHTS } from '@promptslim/tucore';
 import { learnedWeights } from '../tradingusa/adaptive.ts';
 import { experimentSummary } from '../tradingusa/experiments.ts';
+import { evaluateFixedHorizons } from './accuracy.ts';
 import { CRYPTO_SESSION, type CryptoConfig } from './config.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, loadBars, openPositions, type PositionRow } from './broker.ts';
 import { CRYPTO_STRATEGY } from './engine.ts';
@@ -288,6 +289,11 @@ export async function handleCrypto(
             features: {},
           };
       return done({ status: 200, body });
+    }
+
+    /* ---------------- fixed-horizon accuracy (correction item 2) ---------------- */
+    if (rest.length === 1 && rest[0] === 'accuracy' && req.method === 'GET') {
+      return done({ status: 200, body: evaluateFixedHorizons(db) });
     }
 
     /* ---------------- portfolio history ---------------- */

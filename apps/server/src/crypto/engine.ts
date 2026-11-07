@@ -19,6 +19,7 @@ import type { Quote, Regime, ScoreParts, SignalAction } from '@promptslim/tucore
 import { learnedWeights } from '../tradingusa/adaptive.ts';
 import type { CryptoConfig } from './config.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, latestQuote, loadBars, upsertBar, upsertQuote } from './broker.ts';
+import { entryBandOverlapsStop, validateEntryGeometry } from './guard.ts';
 import type { CryptoMarketDataProvider } from './providers/types.ts';
 
 export const CRYPTO_STRATEGY = 'crypto_momentum_v1';
@@ -116,6 +117,10 @@ export interface CryptoScanResult {
   skippedConfidence: number;
   skippedRisk: number;
   skippedLesson: number;
+  /** orders rejected by the entry/stop geometry guard (approved fix 1) */
+  skippedGeometry: number;
+  /** advisory: signals whose entry band dips into the stop floor */
+  bandOverlap: number;
   created: Array<{ id: number; ticker: string; signal: string; confidence: number }>;
 }
 
@@ -133,7 +138,8 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
   const sessionDate = etDate(now);
   const result: CryptoScanResult = {
     scanned: 0, signalsCreated: 0, ordersCreated: 0, skippedDuplicate: 0,
-    skippedConfidence: 0, skippedRisk: 0, skippedLesson: 0, created: [],
+    skippedConfidence: 0, skippedRisk: 0, skippedLesson: 0,
+    skippedGeometry: 0, bandOverlap: 0, created: [],
   };
 
   const symbols = activeSymbols(db);
@@ -268,11 +274,33 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
     result.created.push({ id: signalId, ticker: symbol, signal: action, confidence: fused.confidence });
 
     if (action === 'BUY' && risk.approved && !held.has(symbol) && risk.sizeShares > 0) {
-      db.prepare(
-        `INSERT INTO paper_orders (portfolio, signal_id, ticker, side, qty, limit_price, stop_price, status, fill_mode, created_at)
-         VALUES (?,?,?,?,?,?,?,'PENDING',?,?)`,
-      ).run(CRYPTO_PORTFOLIO, signalId, symbol, 'BUY', risk.sizeShares, st.entryHigh, st.invalidation, config.fillMode, now);
-      result.ordersCreated += 1;
+      // Entry/stop geometry guard (approved correction item 1): the
+      // executable entry must clear stop + buffer or no order is ever
+      // created — rejected before submission, with a reason code in
+      // audit_log. No clamping, no stop widening, no live-order changes.
+      const execRef = quote.ask != null && quote.ask > 0 ? quote.ask : quote.price;
+      const verdict = config.entryStopGuard
+        ? validateEntryGeometry({
+            side: 'BUY', executablePrice: execRef, bandLow: st.entryLow,
+            invalidation: st.invalidation, bufferPct: config.entryStopBufferPct,
+          })
+        : { ok: true as const };
+      const bandOverlap = entryBandOverlapsStop(st.entryLow, st.invalidation, config.entryStopBufferPct);
+      if (bandOverlap) result.bandOverlap += 1;
+      if (!verdict.ok) {
+        result.skippedGeometry += 1;
+        db.prepare('INSERT INTO audit_log (ts, action, entity, entity_id, detail_json) VALUES (?, ?, ?, ?, ?)')
+          .run(now, 'order_rejected', 'signal', String(signalId), JSON.stringify({
+            code: verdict.code, ticker: symbol, executable: execRef, bandLow: st.entryLow,
+            stop: st.invalidation, bufferPct: config.entryStopBufferPct, bandOverlap, detail: verdict.detail,
+          }));
+      } else {
+        db.prepare(
+          `INSERT INTO paper_orders (portfolio, signal_id, ticker, side, qty, limit_price, stop_price, status, fill_mode, created_at)
+           VALUES (?,?,?,?,?,?,?,'PENDING',?,?)`,
+        ).run(CRYPTO_PORTFOLIO, signalId, symbol, 'BUY', risk.sizeShares, st.entryHigh, st.invalidation, config.fillMode, now);
+        result.ordersCreated += 1;
+      }
     } else if (action === 'SELL' && held.has(symbol)) {
       const pos = db.prepare('SELECT qty FROM paper_positions WHERE ticker = ? AND exit_ts IS NULL').get(symbol) as { qty: number } | undefined;
       if (pos) {
@@ -290,6 +318,7 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
       scanned: result.scanned, signals: result.signalsCreated, orders: result.ordersCreated,
       skippedConfidence: result.skippedConfidence, skippedLesson: result.skippedLesson,
       skippedDuplicate: result.skippedDuplicate,
+      skippedGeometry: result.skippedGeometry, bandOverlap: result.bandOverlap,
     }));
 
   return result;

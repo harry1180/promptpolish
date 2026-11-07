@@ -82,6 +82,15 @@ export interface CryptoConfig {
   stopAtrMultiple: number;
   maxHoldSessions: number;
   fillMode: 'AT_SIGNAL' | 'NEXT_OPEN';
+  /**
+   * Approved correction-phase guard (item 1): LONG orders are rejected — before
+   * submission and again at fill time — when the executable entry price does
+   * not clear stop * (1 + entryStopBufferPct). `CRYPTO_ENTRY_STOP_GUARD=0`
+   * is the instant rollback switch. Never clamps prices, never widens stops.
+   */
+  entryStopGuard: boolean;
+  /** safety buffer (fraction) between the stop/invalidation and the entry */
+  entryStopBufferPct: number;
   workers: boolean;
   dbPath: string;
   /** how often quotes are polled when the websocket is down (ms) */
@@ -145,6 +154,8 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
     stopAtrMultiple: Math.min(num(env.CRYPTO_STOP_ATR_MULTIPLE, 2), 5),
     maxHoldSessions: num(env.CRYPTO_MAX_HOLD, 20),
     fillMode: env.CRYPTO_FILL_MODE === 'NEXT_OPEN' ? 'NEXT_OPEN' : 'AT_SIGNAL',
+    entryStopGuard: bool(env.CRYPTO_ENTRY_STOP_GUARD, true),
+    entryStopBufferPct: num(env.CRYPTO_ENTRY_STOP_BUFFER_PCT, 0.001),
     workers: (env.CRYPTO_WORKERS ?? '0') === '1',
     dbPath: env.CRYPTO_DB ?? 'data/crypto.db',
     restPollMs: num(env.CRYPTO_REST_POLL_MS, 5_000),
