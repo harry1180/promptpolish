@@ -62,6 +62,27 @@ describe('Crypto shell', () => {
     expect(window.location.pathname).toBe(`${BASE_PATH}/market`);
   });
 
+  it('shows the win rate with its sample size and 95% interval', async () => {
+    render(<Crypto />);
+    expect(await screen.findByText('Win rate')).toBeTruthy();
+    // 2 wins in 5 closes -> Wilson [11.8%, 76.9%]: the interval travels with
+    // the rate so a small sample can never read as a settled number
+    expect(await screen.findByText('2 of 5 · CI 11.8–76.9%')).toBeTruthy();
+  });
+
+  it('renders the top-K recorder as a read-only shadow card on System', async () => {
+    render(<Crypto />);
+    const nav = await screen.findByRole('navigation', { name: /crypto navigation/i });
+    within(nav).getByRole('link', { name: 'System' }).click();
+
+    expect(await screen.findByText('Top-K ranking (shadow)')).toBeTruthy();
+    expect(await screen.findByText(/every BUY still trades/)).toBeTruthy();
+    expect(await screen.findByText('Would keep')).toBeTruthy();
+    // the sentence is built from two spans — query the parts, not the line
+    expect(await screen.findByText('2/3 wins (67%)')).toBeTruthy();
+    expect(await screen.findByText('0/2 wins (0%)')).toBeTruthy();
+  });
+
   it('falls back to Overview for an unknown crypto path', async () => {
     goto(`${BASE_PATH}/does-not-exist`);
     render(<Crypto />);

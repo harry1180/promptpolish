@@ -4,7 +4,7 @@
  * the BTC benchmark and predicted-vs-actual.
  */
 
-import { getPositions, getTrades } from '../api';
+import { getPositions, getTrades, winRateHint } from '../api';
 import type { PositionRowView, TradeRowView } from '../api';
 import { useEndpoint } from '../data';
 import {
@@ -65,7 +65,7 @@ export function PaperTradingPage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         <StatTile label="Open" value={String(open.length)} hint="spot, long-only" />
         <StatTile label="Closed" value={String(stats?.closed ?? 0)} />
-        <StatTile label="Win rate" value={`${stats?.winRatePct ?? 0}%`} hint={`${stats?.wins ?? 0} wins`} />
+        <StatTile label="Win rate" value={`${stats?.winRatePct ?? 0}%`} hint={winRateHint(stats)} />
         <StatTile label="Net P&L" value={money(stats?.netPnl ?? 0)} tone={toneFor(stats?.netPnl ?? 0)} hint="after fees" />
         <StatTile label="Avg trade" value={pct(stats?.avgReturnPct ?? 0)} tone={toneFor(stats?.avgReturnPct ?? 0)} />
         <StatTile label="Fees paid" value={money(stats?.feesPaid ?? 0)} hint={`${stats?.avgHoldSessions ?? 0}d avg hold`} />

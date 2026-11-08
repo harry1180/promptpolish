@@ -45,8 +45,10 @@ Portfolio, benchmark and the paper ledger. `returnPct` and every trade return ar
                  "returnPct": 1.84, "createdAt": 1760000000000 },
   "benchmark": { "symbol": "BTC", "price": 76661.9, "startPrice": 74120.0,
                  "equity": 103427.55, "returnPct": 3.43 },   // buy-and-hold BTC
-  "stats": { "closed": 5, "wins": 2, "winRatePct": 40, "netPnl": 412.9,
-             "avgReturnPct": 0.82, "feesPaid": 38.4, "avgHoldSessions": 4.2 },
+  "stats": { "closed": 5, "wins": 2, "winRatePct": 40,
+             "winRateCiLowPct": 11.8, "winRateCiHighPct": 76.9,   // Wilson 95%, null when closed = 0
+             "netPnl": 412.9, "avgReturnPct": 0.82,
+             "feesPaid": 38.4, "avgHoldSessions": 4.2 },
   "positions": [ /* PositionRowView[] — see below */ ],
   "recentTrades": [ /* TradeRowView[] (10 newest) */ ],
   "snapshotAt": 1760000000000
@@ -60,6 +62,13 @@ mfe, mae, thesisStatus, predictedReturn, entryFee, signalId`.
 `TradeRowView`: `id, ticker, side, qty, entryPrice, entryTs, exitPrice, exitTs,
 exitReason, netPnl, grossPnl, returnPct, benchmarkReturnPct, excessReturnPct,
 predictedReturnPct, predictionError, holdingSessions, strategy, capital, status`.
+
+**The win rate never travels alone.** `winRatePct` is a point estimate over
+`closed` trades; `winRateCiLowPct`/`winRateCiHighPct` are its Wilson 95%
+interval and are `null` while nothing has closed. 0 wins in 4 closes is `0%`
+with an interval of `[0%, 60%]` — "no information yet", not a system that
+never wins. The UI always renders the sample and the interval next to the
+rate (`4 closes`, `2 of 5 · CI 11.8–76.9%`).
 
 ## GET `/quotes`
 
@@ -163,6 +172,38 @@ Shadow-mode rule experiments (read-only by contract). Query: `from` (default
 
 Graduation, if it ever happens, can only bias conviction **up** — no experiment
 can block or remove a trade.
+
+## GET `/shadow`
+
+The top-K entry-ranking **recorder** (SHADOW — it never gates a trade).
+Each scan ranks its BUY candidates by the continuous technical score and
+marks the best `k` (`CRYPTO_TOPK_K`, default 3) as `selected`, so the
+"enter only the best 3 per scan" idea can be measured against real outcomes
+before it is ever allowed to filter anything. Production confidence is a
+constant 0.514, so it cannot rank — the score can.
+
+```jsonc
+{
+  "enabled": true, "k": 3, "mode": "shadow",
+  "decisionImpact": "NONE — every BUY still trades; this table only records what a top-K rule would have kept",
+  "recorded": 12,        // BUY signals ranked since deploy
+  "selected": 5,         // rows inside the top 3
+  "takenByProduction": 12, // production ordered all of them (unchanged behaviour)
+  "outcomes": [          // closed-trade results split by selected/not
+    { "selected": 1, "n": 3, "wins": 2, "netPnl": 214.5 },
+    { "selected": 0, "n": 2, "wins": 0, "netPnl": -88.1 }
+  ],
+  "recent": [ /* newest 20 rows: ts, session_date, signal_id, ticker, score,
+                 confidence, rank, selected, order_created */ ]
+}
+```
+
+Knobs: `CRYPTO_TOPK_SHADOW` (default `1`; `0` stops the recorder) and
+`CRYPTO_TOPK_K` (default 3, capped at 25). Rows live in `shadow_topk`, keyed
+`UNIQUE(signal_id)`; nothing on the decision path reads that table, so the
+trade flow is identical with the recorder on or off (proven by
+`test/crypto-engine.test.ts`: same tape, recorder on vs off → same signals,
+same orders).
 
 ## GET `/jobs`
 

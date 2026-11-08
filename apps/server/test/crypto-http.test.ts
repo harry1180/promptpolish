@@ -127,3 +127,64 @@ test('unknown crypto paths 404 and the equities routes still answer', async () =
   assert.equal(typeof tuBody, 'object');
   assert.ok(tuBody !== null && Object.keys(tuBody).length > 0, 'it answers with a real body');
 });
+
+test('win rate carries its sample size: Wilson 95% CI over the closed trades', async () => {
+  // before anything closes there is no interval to draw — null, not 0
+  const empty = await fetch(`${base}/api/crypto/trades`);
+  const emptyBody = (await empty.json()) as {
+    stats: { closed: number; winRatePct: number; winRateCiLowPct: number | null; winRateCiHighPct: number | null };
+  };
+  assert.equal(emptyBody.stats.closed, 0);
+  assert.equal(emptyBody.stats.winRateCiLowPct, null, 'no interval with n=0');
+  assert.equal(emptyBody.stats.winRateCiHighPct, null);
+
+  const db = openCryptoDb(cryptoDbPath);
+  try {
+    const insert = db.prepare(
+      `INSERT INTO paper_trades (portfolio, ticker, company, sector, side, qty, entry_price, entry_ts,
+         exit_price, exit_ts, capital, gross_pnl, net_pnl, return_pct, status)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    );
+    // 1 win + 3 losses = 25% on n=4 -> Wilson [4.6%, 69.9%]: a wide interval
+    // that CONTAINS 50%, which is exactly what "no information yet" looks like.
+    const now = Date.now();
+    let i = 0;
+    for (const win of [true, false, false, false]) {
+      i += 1;
+      insert.run('CRYPTO_SPOT', 'BTC', 'Bitcoin', 'Crypto', 'LONG', 1, 100, now - i * 1000,
+        100, now, 100, win ? 10 : -10, win ? 10 : -10, win ? 0.1 : -0.1, 'CLOSED');
+    }
+    const res = await fetch(`${base}/api/crypto/overview`);
+    const body = (await res.json()) as {
+      stats: { closed: number; wins: number; winRatePct: number; winRateCiLowPct: number; winRateCiHighPct: number };
+    };
+    assert.equal(body.stats.closed, 4);
+    assert.equal(body.stats.wins, 1);
+    assert.equal(body.stats.winRatePct, 25);
+    assert.ok(body.stats.winRateCiLowPct > 4 && body.stats.winRateCiLowPct < 6,
+      `low bound ${body.stats.winRateCiLowPct}`);
+    assert.ok(body.stats.winRateCiHighPct > 68 && body.stats.winRateCiHighPct < 72,
+      `high bound ${body.stats.winRateCiHighPct}`);
+    assert.ok(body.stats.winRateCiLowPct <= body.stats.winRatePct &&
+      body.stats.winRatePct <= body.stats.winRateCiHighPct, 'the point estimate sits inside its interval');
+  } finally {
+    db.prepare('DELETE FROM paper_trades').run();
+    db.close();
+  }
+});
+
+test('GET /api/crypto/shadow reports the top-K recorder as read-only evidence', async () => {
+  const res = await fetch(`${base}/api/crypto/shadow`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    enabled: boolean; k: number; mode: string; decisionImpact: string;
+    recorded: number; selected: number; takenByProduction: number;
+    outcomes: unknown[]; recent: unknown[];
+  };
+  assert.equal(body.enabled, true, 'the recorder defaults ON (it changes no decision)');
+  assert.equal(body.k, 3);
+  assert.equal(body.mode, 'shadow');
+  assert.match(body.decisionImpact, /NONE/);
+  assert.equal(body.recorded, 0, 'no scan has run in this hermetic test');
+  assert.ok(Array.isArray(body.outcomes) && Array.isArray(body.recent));
+});

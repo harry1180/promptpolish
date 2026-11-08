@@ -144,6 +144,8 @@ export interface CryptoScanResult {
   skippedGeometry: number;
   /** advisory: signals whose entry band dips into the stop floor */
   bandOverlap: number;
+  /** BUY candidates ranked by the SHADOW top-K recorder (never gates a trade) */
+  shadowRanked: number;
   created: Array<{ id: number; ticker: string; signal: string; confidence: number }>;
 }
 
@@ -162,7 +164,7 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
   const result: CryptoScanResult = {
     scanned: 0, signalsCreated: 0, ordersCreated: 0, skippedDuplicate: 0,
     skippedConfidence: 0, skippedRisk: 0, skippedLesson: 0,
-    skippedGeometry: 0, bandOverlap: 0, created: [],
+    skippedGeometry: 0, bandOverlap: 0, shadowRanked: 0, created: [],
   };
 
   const symbols = activeSymbols(db);
@@ -182,6 +184,10 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
           AND scope_json LIKE '%TECHNICAL_SIGNAL_FAILURE%' LIMIT 1`,
     )
     .get() !== undefined;
+
+  // SHADOW top-K recorder: BUY candidates of THIS scan, ranked after the loop.
+  // Collected only — nothing here can gate, delay or resize an order.
+  const buyCandidates: Array<{ signalId: number; ticker: string; score: number; confidence: number; ordered: boolean }> = [];
 
   const positions = db
     .prepare('SELECT ticker FROM paper_positions WHERE exit_ts IS NULL')
@@ -302,6 +308,10 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
     });
     result.signalsCreated += 1;
     result.created.push({ id: signalId, ticker: symbol, signal: action, confidence: fused.confidence });
+    const candidate = action === 'BUY'
+      ? { signalId, ticker: symbol, score: st.score, confidence: fused.confidence, ordered: false }
+      : null;
+    if (candidate) buyCandidates.push(candidate);
 
     if (action === 'BUY' && risk.approved && !held.has(symbol) && risk.sizeShares > 0) {
       // Entry/stop geometry guard (approved correction item 1): the
@@ -330,6 +340,7 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
            VALUES (?,?,?,?,?,?,?,'PENDING',?,?)`,
         ).run(CRYPTO_PORTFOLIO, signalId, symbol, 'BUY', risk.sizeShares, st.entryHigh, st.invalidation, config.fillMode, now);
         result.ordersCreated += 1;
+        if (candidate) candidate.ordered = true;
       }
     } else if (action === 'SELL' && held.has(symbol)) {
       const pos = db.prepare('SELECT qty FROM paper_positions WHERE ticker = ? AND exit_ts IS NULL').get(symbol) as { qty: number } | undefined;
@@ -341,6 +352,29 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
         result.ordersCreated += 1;
       }
     }
+  }
+
+  // Record-only ranking pass (config.topk.shadow): rank this scan's BUY
+  // candidates by the continuous technical score — production confidence is a
+  // constant 0.514, so it cannot rank anything — and mark the best K. The
+  // orders above are already placed; this block only writes shadow_topk.
+  if (config.topk.shadow && buyCandidates.length > 0) {
+    const ranked = [...buyCandidates].sort((a, b) => b.score - a.score || a.signalId - b.signalId);
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO shadow_topk (ts, session_date, signal_id, ticker, score, confidence, rank, selected, order_created)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    );
+    ranked.forEach((c, i) => {
+      insert.run(now, sessionDate, c.signalId, c.ticker, c.score, c.confidence, i + 1, i < config.topk.k ? 1 : 0, c.ordered ? 1 : 0);
+    });
+    result.shadowRanked = ranked.length;
+    db.prepare('INSERT INTO audit_log (ts, action, entity, entity_id, detail_json) VALUES (?, ?, ?, ?, ?)')
+      .run(now, 'shadow_topk', 'system', 'crypto', JSON.stringify({
+        k: config.topk.k, candidates: ranked.length,
+        selected: Math.min(config.topk.k, ranked.length),
+        ordersCreated: ranked.filter((c) => c.ordered).length,
+        note: 'shadow only — ranking never gates an entry',
+      }));
   }
 
   db.prepare(`INSERT INTO audit_log (ts, action, entity, entity_id, detail_json) VALUES (?, 'scan', 'system', ?, ?)`)

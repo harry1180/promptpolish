@@ -5,8 +5,8 @@
  */
 
 import { useState } from 'react';
-import { getJobs, getStatus, runCycle } from '../api';
-import type { JobsResponse, RunResponse, StatusResponse } from '../api';
+import { getJobs, getShadow, getStatus, runCycle } from '../api';
+import type { JobsResponse, RunResponse, ShadowResponse, StatusResponse } from '../api';
 import { useEndpoint } from '../data';
 import {
   Badge,
@@ -38,6 +38,7 @@ const jobColumns: Array<Column<JobRow>> = [
 export function SystemPage() {
   const status = useEndpoint<StatusResponse>('/status', getStatus);
   const jobs = useEndpoint<JobsResponse>('/jobs', getJobs);
+  const shadow = useEndpoint<ShadowResponse>('/shadow', getShadow);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -115,6 +116,53 @@ export function SystemPage() {
             empty={<p className="py-4 text-sm text-mist">No jobs have run yet — start the server with CRYPTO_WORKERS=1.</p>}
             defaultSort={{ key: 'last', dir: 'desc' }}
           />
+        )}
+      </Card>
+
+      <Card
+        title="Top-K ranking (shadow)"
+        subtitle="records what an 'enter only the best K by score' rule would have kept — it never gates a trade"
+      >
+        {shadow.data === undefined ? (
+          shadow.error ? <ErrorState message={shadow.error} onRetry={shadow.reload} /> : <Loading label="Loading shadow ranking…" />
+        ) : (
+          (() => {
+            const sh = {
+              enabled: shadow.data.enabled ?? false,
+              k: shadow.data.k ?? 0,
+              decisionImpact: shadow.data.decisionImpact ?? 'NONE — records only',
+              recorded: shadow.data.recorded ?? 0,
+              selected: shadow.data.selected ?? 0,
+              takenByProduction: shadow.data.takenByProduction ?? 0,
+              outcomes: shadow.data.outcomes ?? [],
+            };
+            const band = (sel: number): { n: number; wins: number; pnl: number } => {
+              const row = sh.outcomes.find((o) => Number(o.selected) === sel);
+              return { n: row?.n ?? 0, wins: row?.wins ?? 0, pnl: row?.netPnl ?? 0 };
+            };
+            const kept = band(1);
+            const dropped = band(0);
+            const winLine = (b: { n: number; wins: number }): string =>
+              b.n > 0 ? `${b.wins}/${b.n} wins (${Math.round((b.wins / b.n) * 100)}%)` : 'no closed trades yet';
+            return (
+              <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <StatTile label="Recorder" value={sh.enabled ? 'on' : 'off'} hint={sh.k ? `best ${sh.k} per scan` : '—'} tone={sh.enabled ? 'pos' : 'neutral'} />
+                  <StatTile label="Candidates" value={String(sh.recorded)} hint="BUY signals ranked" />
+                  <StatTile label="Would keep" value={String(sh.selected)} hint="top-K by score" />
+                  <StatTile label="Traded anyway" value={String(sh.takenByProduction)} hint="production took all" />
+                </div>
+                <p className="mt-3 text-xs text-mist">{sh.decisionImpact}</p>
+                <p className="mt-1 text-xs text-slate-soft">
+                  top-K outcomes: <span className="font-mono">{winLine(kept)}</span>
+                  {' · '}outside top-K: <span className="font-mono">{winLine(dropped)}</span>
+                  {kept.n + dropped.n === 0
+                    ? ' — evidence accrues as these trades close; promotion to a live gate needs your approval and forward evidence.'
+                    : ''}
+                </p>
+              </>
+            );
+          })()
         )}
       </Card>
 

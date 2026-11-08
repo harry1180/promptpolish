@@ -138,6 +138,38 @@ export interface TradeRowView {
 export interface TradeStats {
   closed: number; wins: number; winRatePct: number; netPnl: number;
   avgReturnPct: number; feesPaid: number; avgHoldSessions: number;
+  /** Wilson 95% interval on the win rate — null until something has closed */
+  winRateCiLowPct: number | null;
+  winRateCiHighPct: number | null;
+}
+
+/**
+ * The win-rate tile's second line. A rate over 4 trades carries no
+ * information, so the sample size and its interval travel with the number:
+ * `2 wins · CI 6-81%`. `100% on 1 trade` should never read as skill.
+ */
+export function winRateHint(stats?: Partial<TradeStats> | null): string {
+  if (!stats) return '';
+  const { closed = 0, wins = 0, winRateCiLowPct: lo, winRateCiHighPct: hi } = stats;
+  if (!closed) return 'no closed trades yet';
+  if (lo == null || hi == null) return `${wins} win${wins === 1 ? '' : 's'} of ${closed}`;
+  return `${wins} of ${closed} · CI ${lo}–${hi}%`;
+}
+
+export interface ShadowResponse {
+  enabled: boolean;
+  k: number;
+  mode: string;
+  decisionImpact: string;
+  recorded: number;
+  selected: number;
+  takenByProduction: number;
+  outcomes: Array<{ selected: number; n: number; wins: number; netPnl: number }>;
+  recent: Array<{
+    ts: number; session_date: string; signal_id: number; ticker: string;
+    score: number; confidence: number; rank: number; selected: number;
+    order_created: number;
+  }>;
 }
 
 export interface OverviewResponse {
@@ -245,6 +277,7 @@ export const getTrades = (limit = 50): Promise<TradesResponse> => get<TradesResp
 export const getPortfolio = (): Promise<PortfolioResponse> => get<PortfolioResponse>('/portfolio');
 export const getLearning = (): Promise<LearningResponse> => get<LearningResponse>('/learning');
 export const getJobs = (): Promise<JobsResponse> => get<JobsResponse>('/jobs');
+export const getShadow = (): Promise<ShadowResponse> => get<ShadowResponse>('/shadow');
 
 export const getSignals = (params: { limit?: number; signal?: string; date?: string } = {}): Promise<SignalsResponse> => {
   const q = new URLSearchParams();

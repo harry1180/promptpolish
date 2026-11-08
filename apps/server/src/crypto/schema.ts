@@ -42,7 +42,24 @@ CREATE TABLE IF NOT EXISTS micro_snapshots (
   symbol TEXT NOT NULL,
   payload TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_micro_snapshots_ts ON micro_snapshots(ts);`;
+CREATE INDEX IF NOT EXISTS idx_micro_snapshots_ts ON micro_snapshots(ts);
+-- Top-K ranking recorder (config.topk): one row per BUY signal the scan
+-- creates, with its rank among that scan's candidates and whether the
+-- un-shipped "best K only" rule would have kept it. RECORD-ONLY: nothing
+-- reads this table on the decision path, so it can never change a trade.
+CREATE TABLE IF NOT EXISTS shadow_topk (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  session_date TEXT NOT NULL,
+  signal_id INTEGER NOT NULL UNIQUE,
+  ticker TEXT NOT NULL,
+  score REAL NOT NULL,
+  confidence REAL NOT NULL,
+  rank INTEGER NOT NULL,
+  selected INTEGER NOT NULL,
+  order_created INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_topk_session ON shadow_topk(session_date);`;
 
 /** SQLite cannot ALTER the same column twice — add it only when missing. */
 function ensureCryptoColumns(db: DatabaseSync): void {

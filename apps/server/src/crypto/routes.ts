@@ -69,8 +69,28 @@ function tradeRow(r: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+/**
+ * Wilson 95% interval for a proportion — the honest way to show a win rate
+ * over a handful of trades: 0 wins in 4 closes is a rate of 0% with an
+ * interval of [0%, 60%], i.e. "no information yet", not a system that never
+ * wins. Returns null while nothing has closed (no interval to draw).
+ */
+function wilson95(wins: number, n: number): { low: number; high: number } | null {
+  if (n <= 0) return null;
+  const z = 1.96;
+  const z2 = z * z;
+  const p = wins / n;
+  const den = 1 + z2 / n;
+  const center = (p + z2 / (2 * n)) / den;
+  const half = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / den;
+  const r = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 1000) / 10;
+  return { low: r(center - half), high: r(center + half) };
+}
+
 function tradeStats(db: DatabaseSync): {
-  closed: number; wins: number; winRatePct: number; netPnl: number; avgReturnPct: number;
+  closed: number; wins: number; winRatePct: number;
+  winRateCiLowPct: number | null; winRateCiHighPct: number | null;
+  netPnl: number; avgReturnPct: number;
   feesPaid: number; avgHoldSessions: number;
 } {
   const row = db.prepare(
@@ -90,10 +110,13 @@ function tradeStats(db: DatabaseSync): {
   const openFees = db
     .prepare('SELECT COALESCE(SUM(entry_fee), 0) AS f FROM paper_positions WHERE exit_ts IS NULL')
     .get() as { f: number };
+  const ci = wilson95(row.wins ?? 0, row.closed);
   return {
     closed: row.closed,
     wins: row.wins ?? 0,
     winRatePct: row.closed > 0 ? Math.round(((row.wins ?? 0) / row.closed) * 1000) / 10 : 0,
+    winRateCiLowPct: ci?.low ?? null,
+    winRateCiHighPct: ci?.high ?? null,
     netPnl: Math.round(row.net * 100) / 100,
     avgReturnPct: Math.round(row.avg_ret * 10000) / 100,
     feesPaid: Math.round((row.fees_closed + openFees.f) * 100) / 100,
@@ -355,6 +378,40 @@ export async function handleCrypto(
         : new Date(now).toISOString().slice(0, 10);
       if (from > to) return done({ status: 400, body: { error: 'from must be before to' } });
       return done({ status: 200, body: experimentSummary(db, from, to) });
+    }
+
+    /* ---------------- top-K ranking recorder (shadow) ---------------- */
+    if (rest.length === 1 && rest[0] === 'shadow' && req.method === 'GET') {
+      const counts = db
+        .prepare('SELECT COUNT(*) AS n, COALESCE(SUM(selected), 0) AS sel, COALESCE(SUM(order_created), 0) AS taken FROM shadow_topk')
+        .get() as { n: number; sel: number; taken: number };
+      const outcomes = db
+        .prepare(
+          `SELECT s.selected AS selected, COUNT(*) AS n,
+                  COALESCE(SUM(CASE WHEN t.net_pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                  COALESCE(SUM(t.net_pnl), 0) AS netPnl
+             FROM shadow_topk s
+             JOIN paper_trades t ON t.signal_id = s.signal_id AND t.status = 'CLOSED'
+            GROUP BY s.selected ORDER BY s.selected`,
+        )
+        .all() as unknown as Array<{ selected: number; n: number; wins: number; netPnl: number }>;
+      const recent = db
+        .prepare('SELECT ts, session_date, signal_id, ticker, score, confidence, rank, selected, order_created FROM shadow_topk ORDER BY id DESC LIMIT 20')
+        .all() as unknown as Array<Record<string, unknown>>;
+      return done({
+        status: 200,
+        body: {
+          enabled: config.topk.shadow,
+          k: config.topk.k,
+          mode: 'shadow',
+          decisionImpact: 'NONE — every BUY still trades; this table only records what a top-K rule would have kept',
+          recorded: counts.n,
+          selected: counts.sel,
+          takenByProduction: counts.taken,
+          outcomes,
+          recent,
+        },
+      });
     }
 
     /* ---------------- jobs ---------------- */

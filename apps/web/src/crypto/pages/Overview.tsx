@@ -4,7 +4,7 @@
  * curve, open positions and the most recent closed trades.
  */
 
-import { getOverview, getPortfolio, getSignals } from '../api';
+import { getOverview, getPortfolio, getSignals, winRateHint } from '../api';
 import type { OverviewResponse, PortfolioResponse, PositionRowView, SignalRowView, SignalsResponse, TradeRowView } from '../api';
 import { Link, useEndpoint } from '../data';
 import {
@@ -140,7 +140,7 @@ export function OverviewPage() {
         <Card title="Paper ledger" subtitle="fee-inclusive: net of exchange fees on both sides">
           <div className="grid grid-cols-2 gap-3">
             <StatTile label="Closed" value={number(stats?.closed ?? 0)} />
-            <StatTile label="Win rate" value={`${number(stats?.winRatePct ?? 0)}%`} hint={`${number(stats?.wins ?? 0)} wins`} />
+            <StatTile label="Win rate" value={`${number(stats?.winRatePct ?? 0)}%`} hint={winRateHint(stats)} />
             <StatTile label="Net P&L" value={money(stats?.netPnl ?? 0)} tone={toneFor(stats?.netPnl ?? 0)} />
             <StatTile label="Avg trade" value={pct(stats?.avgReturnPct ?? 0)} tone={toneFor(stats?.avgReturnPct ?? 0)} />
             <StatTile label="Fees paid" value={money(stats?.feesPaid ?? 0)} hint="entry + exit taker fees" />

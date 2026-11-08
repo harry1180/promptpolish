@@ -230,6 +230,69 @@ test('planted learned weights change the scan (the row is really read)', async (
   }
 });
 
+test('the top-K recorder ranks BUY candidates without touching a single order', async () => {
+  const baseEnv = { CRYPTO_CAPITAL: '100000', CRYPTO_MIN_SIGNAL_CONFIDENCE: '0.5', CRYPTO_MIN_RISK_REWARD: '1' };
+  // K=1: two candidates should be ranked 1 and 2, only the first "selected" —
+  // while the ORDERS stay identical to a run with the recorder switched off.
+  const shadowCfg = cryptoConfigFromEnv({ ...baseEnv, CRYPTO_TOPK_K: '1' });
+  const offCfg = cryptoConfigFromEnv({ ...baseEnv, CRYPTO_TOPK_SHADOW: '0' });
+
+  const provider = new KrakenProvider({
+    tickers: (async () => [
+      { symbol: 'BTC', price: 76000, prevClose: 76500, ts: Date.now(), bid: 75990, ask: 76010, provider: 'kraken', freshness: 'REALTIME' },
+      { symbol: 'ETH', price: 2240, prevClose: 2280, ts: Date.now(), bid: 2239, ask: 2241, provider: 'kraken', freshness: 'REALTIME' },
+    ] as Quote[]) as never,
+    bars: (async () => [] as Candle[]) as never,
+  });
+
+  const dbOn = openCryptoDb(`${dbPath}-topk`);
+  const dbOff = openCryptoDb(`${dbPath}-topk-off`);
+  const now = Date.parse('2026-11-03T12:00:00Z');
+  try {
+    ensureSpotPortfolio(dbOn, shadowCfg);
+    ensureSpotPortfolio(dbOff, offCfg);
+    seedBook(dbOn);
+    seedBook(dbOff);
+
+    const on = await runCryptoScan({ db: dbOn, provider, config: shadowCfg, now });
+    const off = await runCryptoScan({ db: dbOff, provider, config: offCfg, now });
+
+    assert.ok(on.signalsCreated > 0, 'the tape still fires');
+    assert.equal(on.ordersCreated, off.ordersCreated,
+      'SHADOW MUST NOT CHANGE THE TRADE FLOW: same tape, recorder on vs off');
+    assert.equal(on.signalsCreated, off.signalsCreated, 'recorder on/off creates the same signals');
+
+    const rows = dbOn.prepare('SELECT signal_id, ticker, rank, selected, order_created FROM shadow_topk ORDER BY rank').all() as Array<{
+      signal_id: number; ticker: string; rank: number; selected: number; order_created: number;
+    }>;
+    assert.equal(rows.length, on.shadowRanked, 'the scan reports what it recorded');
+    assert.ok(rows.length > 0, 'candidates were recorded');
+    assert.deepEqual(rows.map((r) => r.rank), rows.map((_, i) => i + 1), 'ranks are 1..n with no gaps');
+    assert.equal(rows.filter((r) => r.selected === 1).length, 1, 'K=1 keeps exactly one candidate');
+    assert.equal(rows[0].selected, 1, 'rank 1 is the selected one');
+    assert.ok(rows.every((r) => r.order_created === 1),
+      'production still ordered every candidate — the ranking is an observation, not a gate');
+
+    const signals = dbOn.prepare(`SELECT id FROM signals WHERE signal = 'BUY'`).all() as Array<{ id: number }>;
+    assert.equal(rows.length, signals.length, 'one shadow row per BUY signal, no extras');
+
+    const audit = dbOn.prepare(`SELECT detail_json FROM audit_log WHERE action = 'shadow_topk' ORDER BY id DESC LIMIT 1`).get() as
+      { detail_json: string } | undefined;
+    assert.ok(audit, 'the recorder is auditable');
+    assert.equal(JSON.parse(audit.detail_json).k, 1);
+
+    assert.equal(
+      (dbOff.prepare('SELECT COUNT(*) AS n FROM shadow_topk').get() as { n: number }).n, 0,
+      'CRYPTO_TOPK_SHADOW=0 records nothing at all',
+    );
+  } finally {
+    dbOn.close();
+    dbOff.close();
+    rmSync(`${dbPath}-topk`, { force: true });
+    rmSync(`${dbPath}-topk-off`, { force: true });
+  }
+});
+
 test('ingestTick stamps previous close from the bars, not the placeholder', () => {
   const db = openCryptoDb(`${dbPath}-ingest`);
   try {

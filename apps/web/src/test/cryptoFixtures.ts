@@ -47,7 +47,11 @@ export const OVERVIEW = {
     unrealized: 1_204.3, exposure: 23_441.56, returnPct: 1.84, createdAt: T0,
   },
   benchmark: { symbol: 'BTC', price: 76_661.9, startPrice: 74_120.0, equity: 103_427.55, returnPct: 3.43 },
-  stats: { closed: 5, wins: 2, winRatePct: 40, netPnl: 412.9, avgReturnPct: 0.82, feesPaid: 38.4, avgHoldSessions: 4.2 },
+  stats: {
+    closed: 5, wins: 2, winRatePct: 40, netPnl: 412.9, avgReturnPct: 0.82, feesPaid: 38.4, avgHoldSessions: 4.2,
+    // Wilson 95% interval for 2/5 — the sample size must travel with the rate
+    winRateCiLowPct: 11.8, winRateCiHighPct: 76.9,
+  },
   positions: [
     {
       id: 1, ticker: 'BTC', company: 'BTC', qty: 0.15, entryPrice: 74_900, entryTs: T0, entrySession: 'DAY_0',
@@ -415,6 +419,24 @@ export const ACCURACY = {
 };
 
 /** endpoint key ('status', 'overview', 'experiments', …) -> payload */
+export const SHADOW = {
+  enabled: true,
+  k: 3,
+  mode: 'shadow',
+  decisionImpact: 'NONE — every BUY still trades; this table only records what a top-K rule would have kept',
+  recorded: 12,
+  selected: 5,
+  takenByProduction: 12,
+  outcomes: [
+    { selected: 1, n: 3, wins: 2, netPnl: 214.5 },
+    { selected: 0, n: 2, wins: 0, netPnl: -88.1 },
+  ],
+  recent: [
+    { ts: T0, session_date: '2026-11-07', signal_id: 12, ticker: 'NEAR', score: 0.62, confidence: 0.514, rank: 1, selected: 1, order_created: 1 },
+    { ts: T0, session_date: '2026-11-07', signal_id: 13, ticker: 'UNI', score: 0.31, confidence: 0.514, rank: 2, selected: 1, order_created: 1 },
+  ],
+};
+
 export const FIXTURES: Record<string, unknown> = {
   status: STATUS,
   overview: OVERVIEW,
@@ -435,6 +457,7 @@ export const FIXTURES: Record<string, unknown> = {
   /** /context default = production default (CRYPTO_XCHANGE_CONTEXT off) */
   context: CONTEXT_OFF,
   accuracy: ACCURACY,
+  shadow: SHADOW,
   providers_disabled: PROVIDERS_DISABLED,
   providers_stale: PROVIDERS_STALE,
   xchange_disabled: XCHANGE_DISABLED,

@@ -140,6 +140,16 @@ export interface CryptoConfig {
    * override these once they reach MIN_TRADES.
    */
   fusionWeights: Partial<ScoreParts> | null;
+  /**
+   * Top-K entry ranking — SHADOW ONLY, never gates a trade (standing rule:
+   * nothing may shrink the trade flow without explicit approval). The
+   * recorder ranks each scan's BUY candidates by `shortTermScore` and marks
+   * the best `k` as `selected`, so the "enter only the top 3" idea can be
+   * measured against real outcomes before it is ever allowed to filter.
+   * `CRYPTO_TOPK_SHADOW=0` stops the recorder; production behaviour is
+   * byte-identical with it on or off.
+   */
+  topk: { shadow: boolean; k: number };
   micro: MicroFlagsConfig;
   xchange: XchangeConfig;
 }
@@ -219,6 +229,10 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
     restPollMs: num(env.CRYPTO_REST_POLL_MS, 5_000),
     scanIntervalSec: num(env.CRYPTO_SCAN_INTERVAL, 300),
     fusionWeights: fusionWeightsFromEnv(env.CRYPTO_FUSION_WEIGHTS),
+    topk: {
+      shadow: bool(env.CRYPTO_TOPK_SHADOW, true),
+      k: Math.min(num(env.CRYPTO_TOPK_K, 3), 25),
+    },
     micro: microFromEnv(env),
     xchange: xchangeFromEnv(env),
   };
