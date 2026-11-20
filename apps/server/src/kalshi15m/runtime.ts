@@ -23,7 +23,8 @@
  *      staleness  = Date.now() - lastFrameAt   (pure local)
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { KalshiBook, type TradePrint } from './book.ts';
+import { KalshiBook, type BookMetrics, type TradePrint } from './book.ts';
+import { fairValue, modelEdge } from './fairvalue.ts';
 import { KalshiRest, KalshiWs, KXBTC15M, loadCreds, type AuthConfig, type KalshiCreds, type StreamSocket } from './client.ts';
 import {
   eventOfMarket, msToClose, phaseAt, windowFromRest,
@@ -31,7 +32,7 @@ import {
 } from './lifecycle.ts';
 import {
   ensureK15mTables, insertHealth, insertSample, insertTrade, pruneK15m,
-  updateWindowQuotes, upsertWindow,
+  updateWindowQuotes, upsertWindow, type SampleFair,
 } from './store.ts';
 
 export interface K15mConfig {
@@ -87,6 +88,15 @@ export interface K15mWindow {
   strike: number | null;
 }
 
+/** Spot reference the fair-value model reads (wired to the BTC spot tape). */
+export interface SpotRef {
+  spot: number | null;
+  /** per-second log-return sigma from the tape */
+  sigmaPerSec: number | null;
+  /** which venue produced the number — always surfaced, never hidden */
+  approx: string | null;
+}
+
 export interface K15mDeps {
   db: DatabaseSync;
   config?: K15mConfig;
@@ -95,6 +105,8 @@ export interface K15mDeps {
   socketFactory?: (url: string, headers: Record<string, string>) => StreamSocket;
   now?: () => number;
   fetchImpl?: typeof fetch;
+  /** settlement fair-value inputs; absent = no fair value is recorded (nulls) */
+  spotRef?: (now: number) => SpotRef;
 }
 
 export class K15mRuntime {
@@ -123,11 +135,13 @@ export class K15mRuntime {
   private phase: WindowPhase | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
+  private readonly spotRef: ((now: number) => SpotRef) | undefined;
   private started = false;
 
   constructor(deps: K15mDeps) {
     this.db = deps.db;
     this.now = deps.now ?? Date.now;
+    this.spotRef = deps.spotRef;
     this.config = deps.config ?? k15mConfigFromEnv();
     ensureK15mTables(this.db);
     const creds = deps.creds !== undefined ? deps.creds : loadCreds(this.config.auth);
@@ -212,6 +226,7 @@ export class K15mRuntime {
           stalenessMs: this.stats.lastFrameAt ? now - this.stats.lastFrameAt : null,
           clockDriftMs: this.serverLagOffset(),
           needsSnapshot: book.needsSnapshot,
+          fair: this.computeFair(now, bounds, m),
         });
         book.endSampleWindow();
         this.stats.samples += 1;
@@ -429,6 +444,38 @@ export class K15mRuntime {
     }
   }
 
+  /**
+   * Settlement fair value recorded with each sample: model probability from
+   * the APPROXIMATED spot + the official strike + tape sigma, stored beside
+   * the book's implied mid and the gap between them (edge_pp). Returns null
+   * when no spot source is wired — the row keeps NULLs instead of guesses.
+   * The midpoint here is comparison-only: it is never a fill price.
+   */
+  private computeFair(now: number, bounds: WindowBounds, m: BookMetrics): SampleFair | null {
+    if (!this.spotRef) return null;
+    const ref = this.spotRef(now);
+    const impliedMid = m.bestBid !== null && m.bestAsk !== null
+      ? (m.bestBid + m.bestAsk) / 2
+      : null;
+    const fv = fairValue({
+      spot: ref.spot,
+      strike: this.current?.strike ?? null,
+      tauSec: msToClose(bounds, now) / 1_000,
+      sigmaPerSec: ref.sigmaPerSec,
+      approx: ref.approx,
+    });
+    const edge = modelEdge(fv.pYes, impliedMid);
+    return {
+      spot: ref.spot,
+      sigma: ref.sigmaPerSec,
+      pYes: fv.pYes,
+      impliedMid,
+      edgePp: edge === null ? null : edge * 100,
+      reason: fv.reason ?? null,
+      approx: ref.approx,
+    };
+  }
+
   private writeHealth(now: number, phase: WindowPhase, book: KalshiBook | undefined): void {
     this.lastHealthAt = now;
     const sorted = [...this.serverLag].sort((a, b) => a - b);
@@ -490,6 +537,10 @@ export class K15mRuntime {
           }
         : null,
       book: m ? { ...m, trusted: !book?.needsSnapshot, seq: book?.seq ?? null, levels: m.levels } : null,
+      // model vs book, comparison only — mid is never offered as a fill
+      fairValue: this.current && m
+        ? { reference: 'APPROXIMATION' as const, ...this.computeFair(now, this.current.bounds, m) }
+        : null,
       counters: {
         discovers: this.stats.discovers, discoverErrors: this.stats.discoverErrors,
         rollOvers: this.stats.rollOvers, samples: this.stats.samples,

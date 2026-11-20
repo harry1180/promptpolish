@@ -63,7 +63,11 @@ CREATE TABLE IF NOT EXISTS k15m_book_samples (
   levels_bid INTEGER, levels_ask INTEGER,
   spot_mid REAL, spot_divergence REAL,
   arrival_latency_ms REAL, staleness_ms REAL, clock_drift_ms REAL,
-  needs_snapshot INTEGER NOT NULL DEFAULT 0
+  needs_snapshot INTEGER NOT NULL DEFAULT 0,
+  -- settlement fair value (module 3): APPROXIMATION of the BRTI settlement,
+  -- never the index itself. edge_pp = (p_yes - implied_mid) * 100.
+  fair_spot REAL, fair_sigma REAL, fair_yes REAL, implied_mid REAL,
+  edge_pp REAL, fair_reason TEXT, fair_approx TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_k15m_samples_market_ts ON k15m_book_samples(market_ticker, ts);
 
@@ -101,9 +105,28 @@ CREATE TABLE IF NOT EXISTS k15m_feed_health (
 );
 CREATE INDEX IF NOT EXISTS idx_k15m_health_ts ON k15m_feed_health(ts);`;
 
+/** Columns added after the table first shipped (existing DBs get them too). */
+const K15M_SAMPLE_MIGRATION: Array<[string, string]> = [
+  ['fair_spot', 'REAL'],
+  ['fair_sigma', 'REAL'],
+  ['fair_yes', 'REAL'],
+  ['implied_mid', 'REAL'],
+  ['edge_pp', 'REAL'],
+  ['fair_reason', 'TEXT'],
+  ['fair_approx', 'TEXT'],
+];
+
 /** Open (or create) the kalshi15m tables on an existing database handle. */
 export function ensureK15mTables(db: DatabaseSync): void {
   db.exec(K15M_DDL);
+  // SQLite cannot ALTER the same column twice — add only what is missing
+  const cols = new Set(
+    (db.prepare('PRAGMA table_info(k15m_book_samples)').all() as unknown as Array<{ name: string }>)
+      .map((c) => c.name),
+  );
+  for (const [name, type] of K15M_SAMPLE_MIGRATION) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE k15m_book_samples ADD COLUMN ${name} ${type}`);
+  }
 }
 
 export interface WindowRow {
@@ -163,6 +186,19 @@ export function setWindowResult(db: DatabaseSync, eventTicker: string, result: s
   ).run(result, note, now, eventTicker);
 }
 
+/** Settlement fair value recorded with the sample (module 3, APPROXIMATION). */
+export interface SampleFair {
+  spot: number | null;
+  sigma: number | null;
+  pYes: number | null;
+  impliedMid: number | null;
+  /** (p_yes - implied_mid) * 100 — model edge in percentage points */
+  edgePp: number | null;
+  reason: string | null;
+  /** which venue the spot came from (kraken / coinbase) — provenance */
+  approx: string | null;
+}
+
 export interface SampleRow {
   ts: number;
   marketTicker: string;
@@ -176,6 +212,7 @@ export interface SampleRow {
   stalenessMs?: number | null;
   clockDriftMs?: number | null;
   needsSnapshot: boolean;
+  fair?: SampleFair | null;
 }
 
 export function insertSample(db: DatabaseSync, s: SampleRow): void {
@@ -190,8 +227,8 @@ export function insertSample(db: DatabaseSync, s: SampleRow): void {
        trades_1s, qty_1s, trades_5s, qty_5s, taker_bias_60s,
        walk_bid, walk_ask, levels_bid, levels_ask,
        spot_mid, spot_divergence, arrival_latency_ms, staleness_ms, clock_drift_ms,
-       needs_snapshot)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       needs_snapshot, fair_spot, fair_sigma, fair_yes, implied_mid, edge_pp, fair_reason, fair_approx)
+     VALUES (${Array(39).fill('?').join(',')})`,
   ).run(
     s.ts, s.marketTicker, s.eventTicker, s.phase, s.msToClose,
     m.bestBid, m.bestAsk, m.bestBidSize, m.bestAskSize, m.spread, micro,
@@ -201,6 +238,9 @@ export function insertSample(db: DatabaseSync, s: SampleRow): void {
     s.spotMid ?? null, s.spotDivergence ?? null,
     s.arrivalLatencyMs ?? null, s.stalenessMs ?? null, s.clockDriftMs ?? null,
     s.needsSnapshot ? 1 : 0,
+    s.fair?.spot ?? null, s.fair?.sigma ?? null, s.fair?.pYes ?? null,
+    s.fair?.impliedMid ?? null, s.fair?.edgePp ?? null, s.fair?.reason ?? null,
+    s.fair?.approx ?? null,
   );
 }
 

@@ -182,12 +182,6 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
   });
   cryptoRuntime.start();
 
-  /* Kalshi 15-minute micro-scalping data engine (module 1). OFF unless
-   * KALSHI15M_ENABLED=1 — it shares the crypto DB (additive k15m_* tables),
-   * never touches the spot book, and places no orders by construction. */
-  const k15m = new K15mRuntime({ db: cryptoRuntime.db, config: k15mConfigFromEnv() });
-  k15m.start();
-
   /* BTC spot tape (module 2): reuses the Kraken stream and the Coinbase
    * feed through observer hooks — no second socket for either venue. */
   const spot = new SpotRuntime({ config: spotCfg, db: cryptoRuntime.db });
@@ -195,6 +189,27 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
   cryptoRuntime.observeRaw(spot.observeRaw);
   cryptoRuntime.xchange.observe(spot.observeCoinbase);
   spot.start();
+
+  /* Kalshi 15-minute micro-scalping data engine (modules 1+3). OFF unless
+   * KALSHI15M_ENABLED=1 — it shares the crypto DB (additive k15m_* tables),
+   * never touches the spot book, and places no orders by construction.
+   * Module 3 fair value reads the spot tape: the FRESHER of the two venues
+   * supplies spot + sigma, and the venue name is carried through as the
+   * `approx` label (BRTI is licensed; nothing here is the settlement index).
+   * A stale venue yields nulls -> fair_reason 'no_spot', never a stale number. */
+  const k15m = new K15mRuntime({
+    db: cryptoRuntime.db,
+    config: k15mConfigFromEnv(),
+    spotRef: (now: number) => {
+      const snap = spot.tape.snapshot(now);
+      const ok = (s: typeof snap.coinbase): boolean =>
+        s !== null && s.last !== null && s.stalenessMs !== null && s.stalenessMs < 5_000;
+      const pick = ok(snap.coinbase) ? snap.coinbase : ok(snap.kraken) ? snap.kraken : null;
+      if (!pick || !pick.last) return { spot: null, sigmaPerSec: null, approx: null };
+      return { spot: pick.last.mid, sigmaPerSec: pick.sigma60, approx: pick.venue };
+    },
+  });
+  k15m.start();
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');

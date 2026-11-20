@@ -61,6 +61,7 @@ function makeRuntime(opts: {
   market?: Record<string, unknown>;
   marketCalls?: Array<Record<string, unknown>>;
   configPatch?: Partial<K15mConfig>;
+  spotRef?: (now: number) => { spot: number | null; sigmaPerSec: number | null; approx: string | null };
 } = {}): { rt: K15mRuntime; sock: FakeSocket; now: { t: number }; db: DatabaseSync; restCalls: string[] } {
   const db = new DatabaseSync(':memory:');
   const now = { t: T0 };
@@ -96,6 +97,7 @@ function makeRuntime(opts: {
     creds: { keyId: 'test-key', key: privateKey },
     socketFactory: () => sock as unknown as StreamSocket,
     now: () => now.t,
+    ...(opts.spotRef ? { spotRef: opts.spotRef } : {}),
   });
   return { rt, sock, now, db, restCalls };
 }
@@ -162,6 +164,7 @@ test('discovery -> window row -> book -> sampled tape -> health, all offline', a
   assert.equal(s.ms_to_close, CLOSE - now.t);
   assert.equal(s.spot_mid, null, 'no BTC quote table in this bare DB -> null, not a guess');
   assert.equal(s.needs_snapshot, 0);
+  assert.equal(s.fair_yes, null, 'no spot source wired -> no fair value at all (NULLs)');
 
   // trades: ours stored once, foreign dropped
   assert.equal(count(db, 'k15m_trades'), 1, 'only our market prints are persisted');
@@ -257,6 +260,59 @@ test('rollover: a new window replaces the current one and is persisted', async (
   const rows = db.prepare('SELECT event_ticker, phase FROM k15m_windows ORDER BY close_ts').all() as Array<Record<string, unknown>>;
   assert.equal(rows.length, 2, 'both windows persisted');
   assert.equal(rows[0].event_ticker, 'KXBTC15M-26NOV201545');
+  rt.stop();
+  db.close();
+});
+
+test('module 3: fair value + model edge recorded with every sample', async () => {
+  const { rt, sock, now, db } = makeRuntime({
+    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0002, approx: 'coinbase' }),
+  });
+  await rt.discover();
+  rt.ws.start();
+  sock.fire('open');
+  sock.fire('message', JSON.stringify(frame('orderbook_snapshot')));
+  now.t += 300;
+  rt.tick(now.t);
+
+  const row = db.prepare('SELECT * FROM k15m_book_samples ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
+  assert.equal(row.fair_spot, 59_000, 'the spot the model used is recorded');
+  assert.equal(row.fair_sigma, 0.0002, 'so is the sigma');
+  assert.ok(typeof row.fair_yes === 'number' && (row.fair_yes as number) > 0.5,
+    `spot 59000 vs strike 58643.54 -> YES more likely than not (${row.fair_yes})`);
+  assert.ok(Math.abs((row.implied_mid as number) - 0.435) < 1e-9,
+    'implied mid from the real book: (0.43+0.44)/2 — comparison only, never a fill');
+  assert.ok(typeof row.edge_pp === 'number' && (row.edge_pp as number) > 0,
+    'model above book -> positive edge_pp');
+  assert.ok(Math.abs((row.edge_pp as number) - (((row.fair_yes as number) - 0.435) * 100)) < 1e-6,
+    'edge_pp is exactly (p_yes - implied_mid) * 100');
+  assert.equal(row.fair_reason, null, 'inputs were complete, so no reason is recorded');
+
+  // the live status block carries the same numbers
+  const st = rt.status(now.t) as { fairValue: Record<string, unknown> | null };
+  assert.ok(st.fairValue, 'status reports the fair value');
+  assert.equal(st.fairValue?.approx, 'coinbase', 'the approximating venue is always named');
+  assert.equal(st.fairValue?.reference, 'APPROXIMATION');
+  assert.equal(st.fairValue?.pYes, row.fair_yes);
+  rt.stop();
+  db.close();
+});
+
+test('module 3: a missing spot source records the reason, not a number', async () => {
+  const { rt, sock, now, db } = makeRuntime({
+    spotRef: () => ({ spot: null, sigmaPerSec: null, approx: null }),
+  });
+  await rt.discover();
+  rt.ws.start();
+  sock.fire('open');
+  sock.fire('message', JSON.stringify(frame('orderbook_snapshot')));
+  now.t += 300;
+  rt.tick(now.t);
+  const row = db.prepare('SELECT * FROM k15m_book_samples ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
+  assert.equal(row.fair_yes, null, 'no spot -> no probability');
+  assert.equal(row.edge_pp, null, 'no model -> no claimed edge');
+  assert.equal(row.fair_reason, 'no_spot', 'the reason is on the record');
+  assert.ok(typeof row.implied_mid === 'number', 'the book still reports its own mid');
   rt.stop();
   db.close();
 });
