@@ -50,6 +50,18 @@ export interface K15mConfig {
   staleMs: number;
   /** how long a re-subscribe may wait before we force a REST snapshot */
   snapshotRecoveryMs: number;
+  /**
+   * Which sigma the fair value prices with:
+   *  'max'      (default, conservative) = max(realized, recent implied) — never
+   *             more confident than the market, so an "edge" can only come from
+   *             repricing lag or direction, never from under-measured vol.
+   *  'implied'  = the book's own implied vol (median of recent samples),
+   *             falls back to realized while the ring fills.
+   *  'realized' = tape only (measured, but demonstrably understates).
+   */
+  sigmaSource: 'max' | 'implied' | 'realized';
+  /** samples kept for the implied-sigma median (240 @250ms ≈ 60s) */
+  impliedWindowSamples: number;
   auth: AuthConfig;
 }
 
@@ -74,6 +86,10 @@ export function k15mConfigFromEnv(env: Record<string, string | undefined> = proc
     retentionDays: num(env.KALSHI15M_RETENTION_DAYS, 14),
     staleMs: num(env.KALSHI15M_STALE_MS, 5_000),
     snapshotRecoveryMs: num(env.KALSHI15M_SNAPSHOT_RECOVERY_MS, 1_500),
+    sigmaSource: env.KALSHI15M_SIGMA_SOURCE === 'implied' || env.KALSHI15M_SIGMA_SOURCE === 'realized'
+      ? env.KALSHI15M_SIGMA_SOURCE
+      : 'max',
+    impliedWindowSamples: num(env.KALSHI15M_IMPLIED_WINDOW, 240),
     auth: {
       apiKeyId: env.KALSHI_API_KEY_ID,
       privateKeyPath: env.KALSHI_PRIVATE_KEY_PATH,
@@ -142,6 +158,8 @@ export class K15mRuntime {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
   private readonly spotRef: ((now: number, tauSec: number) => SpotRef) | undefined;
+  /** recent usable book-implied sigmas: the market's own vol estimate */
+  private readonly impliedRing: number[] = [];
   private started = false;
 
   constructor(deps: K15mDeps) {
@@ -465,25 +483,111 @@ export class K15mRuntime {
     const impliedMid = m.bestBid !== null && m.bestAsk !== null
       ? (m.bestBid + m.bestAsk) / 2
       : null;
+    // the book's own vol estimate for this instant, then the recent median
+    // (per-sample implied is jumpy: it dies whenever the mid sits at ~0.5)
+    const sigmaImplied = impliedSigma(impliedMid, ref.spot, strike, tauSec);
+    if (sigmaImplied !== null) {
+      this.impliedRing.push(sigmaImplied);
+      while (this.impliedRing.length > this.config.impliedWindowSamples) this.impliedRing.shift();
+    }
+    const impliedMedian = this.impliedMedian();
+    const chosen = this.chooseSigma(ref.sigmaPerSec, impliedMedian);
+
     const fv = fairValue({
       spot: ref.spot,
       strike,
       tauSec,
-      sigmaPerSec: ref.sigmaPerSec,
+      sigmaPerSec: chosen.sigma,
       approx: ref.approx,
     });
     const edge = modelEdge(fv.pYes, impliedMid);
     return {
       spot: ref.spot,
-      sigma: ref.sigmaPerSec,
+      sigma: chosen.sigma,
       pYes: fv.pYes,
       impliedMid,
       edgePp: edge === null ? null : edge * 100,
       reason: fv.reason ?? null,
       approx: ref.approx,
       // calibration: what sigma the BOOK already believes, next to ours
-      sigmaImplied: impliedSigma(impliedMid, ref.spot, strike, tauSec),
+      sigmaImplied,
       sigmaWindowSec: ref.sigmaWindowSec,
+      sigmaRealized: ref.sigmaPerSec,
+      sigmaSource: chosen.source,
+    };
+  }
+
+  /** Median of the recent usable implied sigmas (null while the ring is empty). */
+  private impliedMedian(): number | null {
+    if (this.impliedRing.length === 0) return null;
+    const sorted = [...this.impliedRing].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  private chooseSigma(
+    realized: number | null, implied: number | null,
+  ): { sigma: number | null; source: string | null } {
+    return chooseSigma(this.config.sigmaSource, realized, implied);
+  }
+
+  /**
+   * Realized-vs-implied vol diagnostics over the recent samples — the number
+   * that decides whether an `edge_pp` is information or a vol artefact.
+   * Bounded (one indexed read of at most `limit` rows); medians are computed
+   * in JS because SQLite has none.
+   */
+  calibration(limit = 2_000): Record<string, unknown> {
+    const rows = this.db.prepare(
+      `SELECT fair_sigma, sigma_realized, sigma_implied, edge_pp, fair_sigma_source, phase
+         FROM k15m_book_samples
+        WHERE fair_sigma IS NOT NULL OR sigma_implied IS NOT NULL
+        ORDER BY id DESC LIMIT ?`,
+    ).all(Math.max(1, Math.min(20_000, limit))) as unknown as Array<Record<string, unknown>>;
+    const nums = (key: string): number[] =>
+      rows.map((r) => r[key]).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    const median = (xs: number[]): number | null => {
+      if (xs.length === 0) return null;
+      const s = [...xs].sort((a, b) => a - b);
+      const mid = s.length >> 1;
+      return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+    };
+    const realized = nums('sigma_realized');
+    const implied = nums('sigma_implied');
+    const edges = nums('edge_pp');
+    const ratios: number[] = [];
+    for (const r of rows) {
+      const rl = r.sigma_realized;
+      const im = r.sigma_implied;
+      if (typeof rl === 'number' && typeof im === 'number' && rl > 0 && im > 0) ratios.push(im / rl);
+    }
+    const absEdges = edges.map(Math.abs).sort((a, b) => a - b);
+    const sources: Record<string, number> = {};
+    for (const r of rows) {
+      const s = typeof r.fair_sigma_source === 'string' ? r.fair_sigma_source : 'null';
+      sources[s] = (sources[s] ?? 0) + 1;
+    }
+    return {
+      window: { rows: rows.length, limit },
+      config: {
+        sigmaSource: this.config.sigmaSource,
+        impliedWindowSamples: this.config.impliedWindowSamples,
+        impliedRing: this.impliedRing.length,
+      },
+      sigma: {
+        realizedMedian: median(realized),
+        impliedMedian: median(implied),
+        impliedOverRealizedMedian: median(ratios),
+        pairedSamples: ratios.length,
+      },
+      edge: {
+        medianPp: median(edges),
+        p95AbsPp: absEdges.length ? absEdges[Math.min(absEdges.length - 1, Math.floor(absEdges.length * 0.95))] : null,
+        shareOver2Pp: edges.length ? edges.filter((e) => Math.abs(e) > 2).length / edges.length : null,
+      },
+      sources,
+      note: 'edge_pp is information ONLY while sigma is calibrated: compare '
+        + 'impliedOverRealizedMedian with 1 before believing any edge.',
     };
   }
 
@@ -563,7 +667,42 @@ export class K15mRuntime {
         sampleMs: this.config.sampleMs, discoverMs: this.config.discoverMs,
         healthMs: this.config.healthMs, staleMs: this.config.staleMs,
       },
+      /** sigma policy in force — an edge is only meaningful with this in view */
+      sigmaPolicy: {
+        source: this.config.sigmaSource,
+        impliedWindowSamples: this.config.impliedWindowSamples,
+        impliedRing: this.impliedRing.length,
+      },
       lastError: this.stats.lastError,
     };
   }
+}
+
+/**
+ * The sigma the fair value prices with (K15mConfig.sigmaSource).
+ *
+ * 'max' is the shipped default: never MORE confident than the market, so a
+ * positive edge can only come from repricing lag or direction — a vol
+ * disagreement cannot manufacture one, which is exactly what made the very
+ * first live sample claim a +30pp edge on a 5x-understated realized vol.
+ * Pure function: exported so the policy is unit-tested without a runtime.
+ */
+export function chooseSigma(
+  mode: 'max' | 'implied' | 'realized',
+  realized: number | null,
+  implied: number | null,
+): { sigma: number | null; source: string | null } {
+  if (mode === 'realized') {
+    return { sigma: realized, source: realized !== null ? 'realized' : 'none' };
+  }
+  if (mode === 'implied') {
+    if (implied !== null) return { sigma: implied, source: 'implied' };
+    return { sigma: realized, source: realized !== null ? 'realized' : 'none' };
+  }
+  if (realized === null && implied === null) return { sigma: null, source: 'none' };
+  if (realized === null) return { sigma: implied, source: 'implied' };
+  if (implied === null) return { sigma: realized, source: 'realized' };
+  return realized >= implied
+    ? { sigma: realized, source: 'max/realized' }
+    : { sigma: implied, source: 'max/implied' };
 }

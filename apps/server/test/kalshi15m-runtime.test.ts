@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync } from 'node:crypto';
-import { K15mRuntime, k15mConfigFromEnv, type K15mConfig } from '../src/kalshi15m/runtime.ts';
+import { K15mRuntime, chooseSigma, k15mConfigFromEnv, type K15mConfig } from '../src/kalshi15m/runtime.ts';
 import { KalshiRest, type StreamSocket } from '../src/kalshi15m/client.ts';
 
 const FIX = new URL('./fixtures/kalshi15m/', import.meta.url);
@@ -316,6 +316,73 @@ test('module 3: a missing spot source records the reason, not a number', async (
   assert.equal(row.edge_pp, null, 'no model -> no claimed edge');
   assert.equal(row.fair_reason, 'no_spot', 'the reason is on the record');
   assert.ok(typeof row.implied_mid === 'number', 'the book still reports its own mid');
+  rt.stop();
+  db.close();
+});
+
+test('sigma policy: chooseSigma is pure and never more confident than the market', () => {
+  // 'max' (default): the binding constraint wins, and the source says which
+  assert.deepEqual(chooseSigma('max', 1e-4, 8e-4), { sigma: 8e-4, source: 'max/implied' });
+  assert.deepEqual(chooseSigma('max', 9e-4, 2e-4), { sigma: 9e-4, source: 'max/realized' });
+  assert.deepEqual(chooseSigma('max', null, 5e-4), { sigma: 5e-4, source: 'implied' });
+  assert.deepEqual(chooseSigma('max', 5e-4, null), { sigma: 5e-4, source: 'realized' });
+  assert.deepEqual(chooseSigma('max', null, null), { sigma: null, source: 'none' });
+  // explicit modes, including their honest fallbacks
+  assert.deepEqual(chooseSigma('realized', 1e-4, 8e-4), { sigma: 1e-4, source: 'realized' });
+  assert.deepEqual(chooseSigma('realized', null, 8e-4), { sigma: null, source: 'none' });
+  assert.deepEqual(chooseSigma('implied', 1e-4, 8e-4), { sigma: 8e-4, source: 'implied' });
+  assert.deepEqual(chooseSigma('implied', 1e-4, null), { sigma: 1e-4, source: 'realized' });
+});
+
+test('config: sigma policy defaults to max, overridable, never fuzzy-matched', () => {
+  assert.equal(k15mConfigFromEnv({}).sigmaSource, 'max', 'conservative default');
+  assert.equal(k15mConfigFromEnv({ KALSHI15M_SIGMA_SOURCE: 'implied' }).sigmaSource, 'implied');
+  assert.equal(k15mConfigFromEnv({ KALSHI15M_SIGMA_SOURCE: 'realized' }).sigmaSource, 'realized');
+  assert.equal(k15mConfigFromEnv({ KALSHI15M_SIGMA_SOURCE: 'MAX' }).sigmaSource, 'max', 'case-sensitive');
+  assert.equal(k15mConfigFromEnv({ KALSHI15M_SIGMA_SOURCE: 'typo' }).sigmaSource, 'max');
+  assert.equal(k15mConfigFromEnv({}).impliedWindowSamples, 240);
+});
+
+test('module 3.2: pricing with max(realized, implied) kills the fake edge', async () => {
+  const { rt, sock, now, db } = makeRuntime({
+    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0001, sigmaWindowSec: 60, approx: 'coinbase' }),
+  });
+  await rt.discover();
+  rt.ws.start();
+  sock.fire('open');
+  // a book that prices YES at 0.605 while our tape says vol is 8x lower
+  sock.fire('message', JSON.stringify({
+    type: 'orderbook_snapshot', sid: 4, seq: 1,
+    msg: { market_ticker: MKT, yes_dollars_fp: [['0.6000', '100']], no_dollars_fp: [['0.3900', '100']] },
+  }));
+  now.t += 300;
+  rt.tick(now.t);
+  const row = db.prepare('SELECT * FROM k15m_book_samples ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
+
+  assert.equal(row.fair_sigma_source, 'max/implied', 'the market binds: we do not price with our own thinner vol');
+  assert.equal(row.sigma_realized, 0.0001, 'our tape number is still recorded for calibration');
+  assert.ok(typeof row.sigma_implied === 'number' && (row.sigma_implied as number) > 0.0005,
+    `book implies ~8x our vol: ${row.sigma_implied}`);
+  assert.equal(row.fair_sigma, row.sigma_implied, 'fair value priced with the binding sigma');
+  assert.ok(Math.abs(row.edge_pp as number) < 0.1,
+    `priced at the market's own vol the model edge is ~0, got ${row.edge_pp}`);
+  assert.ok(Math.abs((row.fair_yes as number) - 0.605) < 0.01, `p tracks the book: ${row.fair_yes}`);
+
+  // calibration aggregates the same rows
+  const cal = rt.calibration(100) as {
+    window: { rows: number };
+    sigma: { realizedMedian: number | null; impliedMedian: number | null; impliedOverRealizedMedian: number | null };
+    edge: { medianPp: number | null; shareOver2Pp: number | null };
+    sources: Record<string, number>;
+    config: { sigmaSource: string };
+  };
+  assert.ok(cal.window.rows >= 1, 'rows aggregated');
+  assert.equal(cal.config.sigmaSource, 'max');
+  assert.ok((cal.sources['max/implied'] ?? 0) >= 1, 'source mix reported');
+  assert.ok(cal.sigma.impliedMedian !== null && cal.sigma.realizedMedian === 0.0001);
+  assert.ok((cal.sigma.impliedOverRealizedMedian ?? 0) > 4, 'the ratio that exposes a vol gap');
+  assert.ok(Math.abs(cal.edge.medianPp ?? 99) < 1, 'median edge ~0 once priced at the market vol');
+  assert.ok((cal.edge.shareOver2Pp ?? 1) < 0.5, 'few samples exceed 2pp');
   rt.stop();
   db.close();
 });

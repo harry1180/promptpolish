@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS k15m_book_samples (
   -- calibration: per-second sigma the BOOK's own mid implies (null when the
   -- inversion is uninformative). Compare against fair_sigma before believing
   -- any edge_pp — a vol mismatch makes a fake edge.
-  sigma_implied REAL, fair_sigma_window INTEGER
+  sigma_implied REAL, fair_sigma_window INTEGER,
+  sigma_realized REAL, fair_sigma_source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_k15m_samples_market_ts ON k15m_book_samples(market_ticker, ts);
 
@@ -120,6 +121,8 @@ const K15M_SAMPLE_MIGRATION: Array<[string, string]> = [
   ['fair_approx', 'TEXT'],
   ['sigma_implied', 'REAL'],
   ['fair_sigma_window', 'INTEGER'],
+  ['sigma_realized', 'REAL'],
+  ['fair_sigma_source', 'TEXT'],
 ];
 
 /** Open (or create) the kalshi15m tables on an existing database handle. */
@@ -207,6 +210,14 @@ export interface SampleFair {
   sigmaImplied: number | null;
   /** realized-sigma window actually used (60/300/900 seconds), null if none */
   sigmaWindowSec: number | null;
+  /** tape-only sigma for the same sample (before any policy blend) */
+  sigmaRealized: number | null;
+  /**
+   * which sigma the fair value priced with:
+   * max/implied | max/realized | implied | realized | none — backtests must
+   * know this, or a policy change silently rewrites history.
+   */
+  sigmaSource: string | null;
 }
 
 export interface SampleRow {
@@ -238,8 +249,8 @@ export function insertSample(db: DatabaseSync, s: SampleRow): void {
        walk_bid, walk_ask, levels_bid, levels_ask,
        spot_mid, spot_divergence, arrival_latency_ms, staleness_ms, clock_drift_ms,
        needs_snapshot, fair_spot, fair_sigma, fair_yes, implied_mid, edge_pp, fair_reason, fair_approx,
-       sigma_implied, fair_sigma_window)
-     VALUES (${Array(41).fill('?').join(',')})`,
+       sigma_implied, fair_sigma_window, sigma_realized, fair_sigma_source)
+     VALUES (${Array(43).fill('?').join(',')})`,
   ).run(
     s.ts, s.marketTicker, s.eventTicker, s.phase, s.msToClose,
     m.bestBid, m.bestAsk, m.bestBidSize, m.bestAskSize, m.spread, micro,
@@ -252,6 +263,7 @@ export function insertSample(db: DatabaseSync, s: SampleRow): void {
     s.fair?.spot ?? null, s.fair?.sigma ?? null, s.fair?.pYes ?? null,
     s.fair?.impliedMid ?? null, s.fair?.edgePp ?? null, s.fair?.reason ?? null,
     s.fair?.approx ?? null, s.fair?.sigmaImplied ?? null, s.fair?.sigmaWindowSec ?? null,
+    s.fair?.sigmaRealized ?? null, s.fair?.sigmaSource ?? null,
   );
 }
 

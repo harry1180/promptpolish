@@ -453,6 +453,12 @@ export async function handleCrypto(
         const rows = recentSamples(db, market, int(url.searchParams.get('limit'), 300));
         return done({ status: 200, body: { count: rows.length, market, samples: rows } });
       }
+      if (rest[1] === 'calibration') {
+        if (!k) {
+          return done({ status: 200, body: { enabled: false, note: 'K15mRuntime not constructed in this process' } });
+        }
+        return done({ status: 200, body: k.calibration(int(url.searchParams.get('limit'), 2_000)) });
+      }
       if (rest[1] === 'spot') {
         if (!deps.spot) {
           return done({ status: 200, body: { enabled: false, note: 'SpotRuntime not constructed in this process' } });
