@@ -188,3 +188,25 @@ test('GET /api/crypto/shadow reports the top-K recorder as read-only evidence', 
   assert.equal(body.recorded, 0, 'no scan has run in this hermetic test');
   assert.ok(Array.isArray(body.outcomes) && Array.isArray(body.recent));
 });
+
+test('GET /api/crypto/kalshi15m: engine status + sub-resources, off by default', async () => {
+  const res = await fetch(`${base}/api/crypto/kalshi15m`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as {
+    enabled: boolean; series: string; window: unknown; book: unknown;
+    counters: Record<string, number>; cadence: Record<string, number>;
+  };
+  assert.equal(body.enabled, false, 'the Kalshi engine is never on unless configured');
+  assert.equal(body.series, 'KXBTC15M');
+  assert.equal(body.window, null, 'no window discovered while disabled');
+  assert.equal(body.book, null);
+  assert.equal(body.cadence.sampleMs, 250, 'defaults surface in the status');
+  assert.ok(!JSON.stringify(body).includes('PRIVATE'), 'no key material ever emitted');
+
+  for (const sub of ['windows', 'samples', 'health']) {
+    const r = await fetch(`${base}/api/crypto/kalshi15m/${sub}`);
+    assert.equal(r.status, 200, `${sub} must answer`);
+    const b = (await r.json()) as { count: number };
+    assert.equal(typeof b.count, 'number', `${sub} reports a count even when empty`);
+  }
+});

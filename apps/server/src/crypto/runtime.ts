@@ -21,6 +21,8 @@ export interface CryptoRuntimeOptions {
   workers?: boolean;
   config?: CryptoConfig;
   cycleMs?: number;
+  /** subscribe Kraken's `trade` channel too (BTC spot tape needs prints) */
+  spotTape?: boolean;
 }
 
 export class CryptoRuntime {
@@ -36,6 +38,24 @@ export class CryptoRuntime {
   /** set after the observer exists so the stream closure never reads early */
   private onKrakenTick: ((q: { symbol: string; price: number; ts: number; bid?: number; ask?: number }) => void) | null = null;
   private started = false;
+  /**
+   * Observer taps for the BTC spot tape (Kalshi 15-minute engine). Arrays are
+   * passed BY REFERENCE into the stream options, so a hook registered after
+   * construction is still seen by the next tick — and no hook ever has a path
+   * into the broker.
+   */
+  private readonly spotHooks: Array<(q: { symbol: string; price: number; ts: number; bid?: number; ask?: number }) => void> = [];
+  private readonly rawObservers: Array<(text: string) => void> = [];
+
+  /** Tap every Kraken ticker tick (BTC tape: returns, divergence, lead/lag). */
+  observeSpot(cb: (q: { symbol: string; price: number; ts: number; bid?: number; ask?: number }) => void): void {
+    this.spotHooks.push(cb);
+  }
+
+  /** Tap raw Kraken frames (the `trade` channel the tape parses). */
+  observeRaw(cb: (text: string) => void): void {
+    this.rawObservers.push(cb);
+  }
 
   constructor(opts: CryptoRuntimeOptions = {}) {
     this.config = opts.config ?? cryptoConfigFromEnv();
@@ -50,6 +70,10 @@ export class CryptoRuntime {
         try { ingestTick(this.db, [q]); } catch { /* one tick lost; the next arrives in ms */ }
         try { this.micro?.onQuote(q, Date.now()); } catch { /* shadow only */ }
         try { this.onKrakenTick?.(q); } catch { /* observer only — trading unaffected */ }
+        // spot-tape observers (BTC 15-min engine): same tick, no extra socket
+        for (const hook of this.spotHooks) {
+          try { hook(q); } catch { /* tape is an observer; trading unaffected */ }
+        }
       },
       restPoll: async () => {
         const quotes = await this.provider.getQuotes(activeSymbols(this.db));
@@ -57,10 +81,12 @@ export class CryptoRuntime {
         return quotes.length;
       },
       restPollMs: this.config.restPollMs,
-      // --- shadow observers (micro module). Both are inert when the flag is
-      // off: extraChannels stays empty and onRawMessage is never set, so the
-      // socket subscribes exactly as before.
-      ...(this.config.micro.enabled ? { extraChannels: ['trade'] } : {}),
+      // --- shadow observers (micro module + BTC spot tape). Inert when the flags
+      // are off: extraChannels stays empty and onRawMessage is never set, so
+      // the socket subscribes exactly as before. The `trade` channel is added
+      // by EITHER consumer — one subscription, both observers fed.
+      ...((this.config.micro.enabled || opts.spotTape) ? { extraChannels: ['trade'] } : {}),
+      rawObservers: this.rawObservers,
       onRawMessage: this.config.micro.enabled
         ? (text: string) => { try { this.micro?.enqueueRaw(text, Date.now()); } catch { /* counted in engine */ } }
         : undefined,

@@ -44,6 +44,14 @@ export interface PriceStreamOptions {
    * production ingest path. Used by the shadow microstructure engine.
    */
   onRawMessage?: (text: string) => void;
+  /**
+   * Additional raw-frame observers, invoked after the ticker parse like
+   * `onRawMessage`. A list (not a single callback) because two independent
+   * shadow consumers exist — the micro engine and the BTC spot tape — and
+   * neither may steal the other's hook. Runs inside try/catch: an observer
+   * that throws can never affect the production ingest path.
+   */
+  rawObservers?: Array<(text: string) => void>;
 }
 
 /** Kraken's v2 websocket names bitcoin BTC. The v1 legacy alias is rejected
@@ -187,6 +195,9 @@ export class CryptoPriceStream {
       // observer runs AFTER the production parse, never in front of it
       if (this.opts.onRawMessage) {
         try { this.opts.onRawMessage(text); } catch { /* observer must not break ingest */ }
+      }
+      for (const obs of this.opts.rawObservers ?? []) {
+        try { obs(text); } catch { /* observers never break ingest */ }
       }
     });
     socket.on('error', () => { /* 'close' follows and drives the fallback */ });

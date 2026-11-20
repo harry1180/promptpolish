@@ -78,6 +78,16 @@ services:
       SCALPING_ALPHA_ENABLED: "1"
       SHADOW_MODE: "1"
       LIVE_EXECUTION_ENABLED: "0"
+      # Kalshi BTC 15-minute micro-scalping DATA engine (module 1 + 2).
+      # Read-only market data: window discovery, order book, trade tape and the
+      # BTC spot tape (Coinbase + Kraken via observer hooks — no new sockets).
+      # KXBTC15M series fee_type=quadratic => takers pay 0.07*P*(1-P), makers
+      # pay nothing; the engine holds no order code at all (paper comes next,
+      # behind its own flag). KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH come
+      # from the env_file below (same read-only Kalshi credential the predict
+      # dashboard uses; the key file is mounted read-only at /run/secrets).
+      KALSHI15M_ENABLED: "1"
+      CRYPTO_SPOT_TAPE: "1"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"
@@ -113,9 +123,15 @@ services:
       # (retired IDs return 404; override here without touching code):
       TU_GROQ_MODEL: "openai/gpt-oss-120b"
       TU_GEMINI_MODEL: "gemini-2.5-flash"
+    # Kalshi Ed25519 key: host file is 640 root:predict and the container runs
+    # as `node`, so it gets the predict group (982) instead of the file being
+    # chmod'ed — no host credential changes, read-only mount, never in the image.
+    group_add:
+      - "982"
     volumes:
       # SQLite db + auto-generated PP master key (provider keys at rest)
       - pp-data:/data
+      - /opt/yard/predict_app/sec/kal.key:/run/secrets/kalshi.key:ro
     labels:
       - traefik.enable=true
       - traefik.http.services.pp-api.loadbalancer.server.port=8787

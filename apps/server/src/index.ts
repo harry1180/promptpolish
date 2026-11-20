@@ -12,6 +12,8 @@ import { TradingRuntime } from './tradingusa/runtime.ts';
 import { handleTradingusa } from './tradingusa/routes.ts';
 import { CryptoRuntime } from './crypto/runtime.ts';
 import { handleCrypto } from './crypto/routes.ts';
+import { K15mRuntime, k15mConfigFromEnv } from './kalshi15m/runtime.ts';
+import { SpotRuntime, spotConfigFromEnv } from './kalshi15m/spot.ts';
 import { ActStack, actConfigFromEnv } from './act/store.ts';
 import {
   buildAggregate, validateFilters, validateTags,
@@ -167,13 +169,32 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
 
   /* Crypto book: separate DB (never promptpolice.db, never tradingusa.db),
    * Kraken provider + websocket, workers only under CRYPTO_WORKERS=1. */
+  // BTC spot tape config is read BEFORE the stream is built: it decides
+  // whether Kraken's `trade` channel is subscribed at all (one subscription
+  // shared with the micro engine — never a second socket).
+  const spotCfg = spotConfigFromEnv();
   const cryptoRuntime = new CryptoRuntime({
     dbPath: opts.cryptoDbPath
       ?? process.env.CRYPTO_DB
       ?? (isMainModule(import.meta.url, process.argv[1]) ? 'data/crypto.db' : ':memory:'),
     workers: opts.cryptoWorkers ?? process.env.CRYPTO_WORKERS === '1',
+    spotTape: spotCfg.enabled,
   });
   cryptoRuntime.start();
+
+  /* Kalshi 15-minute micro-scalping data engine (module 1). OFF unless
+   * KALSHI15M_ENABLED=1 — it shares the crypto DB (additive k15m_* tables),
+   * never touches the spot book, and places no orders by construction. */
+  const k15m = new K15mRuntime({ db: cryptoRuntime.db, config: k15mConfigFromEnv() });
+  k15m.start();
+
+  /* BTC spot tape (module 2): reuses the Kraken stream and the Coinbase
+   * feed through observer hooks — no second socket for either venue. */
+  const spot = new SpotRuntime({ config: spotCfg, db: cryptoRuntime.db });
+  cryptoRuntime.observeSpot(spot.observeKraken);
+  cryptoRuntime.observeRaw(spot.observeRaw);
+  cryptoRuntime.xchange.observe(spot.observeCoinbase);
+  spot.start();
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -199,7 +220,7 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
     /* ---------------- Crypto (24/7 spot paper book) ---------------- */
     if (path.startsWith('/api/crypto/')) {
       const handled = await handleCrypto(req, res, path, {
-        runtime: cryptoRuntime, readBody, json,
+        runtime: cryptoRuntime, k15m, spot, readBody, json,
       });
       if (handled) return;
     }

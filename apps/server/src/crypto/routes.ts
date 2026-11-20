@@ -17,6 +17,9 @@ import { experimentSummary } from '../tradingusa/experiments.ts';
 import { evaluateFixedHorizons } from './accuracy.ts';
 import { handleXchange } from '../xchange/routes.ts';
 import { CRYPTO_SESSION, type CryptoConfig } from './config.ts';
+import { k15mCounts, recentSamples, windowRows } from '../kalshi15m/store.ts';
+import type { K15mRuntime } from '../kalshi15m/runtime.ts';
+import type { SpotRuntime } from '../kalshi15m/spot.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, loadBars, openPositions, type PositionRow } from './broker.ts';
 import { CRYPTO_STRATEGY } from './engine.ts';
 import type { CryptoRuntime } from './runtime.ts';
@@ -25,6 +28,10 @@ import { snapshotEquity } from './workers.ts';
 
 export interface CryptoDeps {
   runtime: CryptoRuntime;
+  /** Kalshi 15-minute engine (constructed in createApp; absent in tests) */
+  k15m?: K15mRuntime | undefined;
+  /** BTC spot tape (Coinbase + Kraken observer hooks) */
+  spot?: SpotRuntime | undefined;
   readBody: (req: IncomingMessage) => Promise<unknown>;
   json: (res: ServerResponse, status: number, body: unknown) => void;
 }
@@ -432,6 +439,36 @@ export async function handleCrypto(
           jobs: db.prepare('SELECT name, last_status, duration_ms, last_error FROM system_jobs ORDER BY name').all(),
         },
       });
+    }
+
+    /* ---------------- Kalshi 15-minute engine (read-only) ---------------- */
+    if (rest.length >= 1 && rest[0] === 'kalshi15m' && req.method === 'GET') {
+      const k = deps.k15m;
+      if (rest[1] === 'windows') {
+        return done({ status: 200, body: { count: k15mCounts(db).windows, windows: windowRows(db, int(url.searchParams.get('limit'), 20)) } });
+      }
+      if (rest[1] === 'samples') {
+        const market = url.searchParams.get('market') ?? k?.current?.marketTicker ?? '';
+        if (!market) return done({ status: 200, body: { count: 0, samples: [] } });
+        const rows = recentSamples(db, market, int(url.searchParams.get('limit'), 300));
+        return done({ status: 200, body: { count: rows.length, market, samples: rows } });
+      }
+      if (rest[1] === 'spot') {
+        if (!deps.spot) {
+          return done({ status: 200, body: { enabled: false, note: 'SpotRuntime not constructed in this process' } });
+        }
+        return done({ status: 200, body: deps.spot.status(now) });
+      }
+      if (rest[1] === 'health') {
+        const rows = db.prepare('SELECT * FROM k15m_feed_health ORDER BY id DESC LIMIT ?')
+          .all(int(url.searchParams.get('limit'), 20)) as unknown as unknown[];
+        return done({ status: 200, body: { count: rows.length, health: rows } });
+      }
+      // default: live status (window, book, feed counters) — never secrets
+      if (k) return done({ status: 200, body: k.status(now) });
+      let counts: Record<string, number> = {};
+      try { counts = k15mCounts(db); } catch { counts = {}; } // tables may not exist
+      return done({ status: 200, body: { enabled: false, note: 'K15mRuntime not constructed in this process', counts } });
     }
 
     /* ---------------- multi-exchange market intelligence ---------------- */

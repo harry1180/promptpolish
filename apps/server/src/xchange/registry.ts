@@ -93,8 +93,23 @@ export class XchangeManager {
     }
   }
 
+  /**
+   * External observers of the COINBASE event stream (Kraken reaches the spot
+   * tape through CryptoRuntime.observeSpot instead — exactly one path per
+   * venue, so nothing is counted twice). Failures in an observer can never
+   * affect ingest.
+   */
+  private readonly observers: Array<(ev: CanonicalEvent) => void> = [];
+
+  observe(cb: (ev: CanonicalEvent) => void): void {
+    this.observers.push(cb);
+  }
+
   private onEvent(ev: CanonicalEvent): void {
     this.acc.observe(ev);
+    for (const cb of this.observers) {
+      try { cb(ev); } catch { /* observer must not break ingest */ }
+    }
   }
 
   /**
