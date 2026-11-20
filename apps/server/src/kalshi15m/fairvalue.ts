@@ -166,3 +166,45 @@ export function modelEdge(pYes: number | null, impliedMid: number | null): numbe
 export function tauSeconds(closeTs: number, now: number): number {
   return (closeTs - now) / 1_000;
 }
+
+/**
+ * Invert the model: the per-second sigma that WOULD justify the book's own
+ * implied probability. This is the calibration instrument — comparing it
+ * against the realized sigma over the same horizon tells us whether our vol
+ * input is sane before any strategy is allowed to call the gap "edge".
+ *
+ * Returns null when the inversion carries no information:
+ *  - implied p is too close to 0.5 (z ~ 0 -> any sigma fits),
+ *  - the sign disagrees with spot vs strike (the book and the tape disagree
+ *    about direction — a data problem, not a vol number),
+ *  - tau or strike unusable.
+ */
+export function impliedSigma(
+  pImplied: number | null, spot: number | null, strike: number | null, tauSec: number | null,
+): number | null {
+  if (pImplied === null || spot === null || strike === null || tauSec === null) return null;
+  if (!(pImplied > 0 && pImplied < 1) || !(spot > 0) || !(strike > 0) || !(tauSec > 0)) return null;
+  const z = normInv(pImplied);
+  if (z === null || Math.abs(z) < 0.1) return null;
+  const dist = Math.log(spot / strike);
+  if (!Number.isFinite(dist) || dist === 0) return null;
+  if (Math.sign(z) !== Math.sign(dist)) return null;
+  const units = tauSec >= 60 ? tauSec - 40 : (tauSec ** 3) / 10_800;
+  if (!(units > 0)) return null;
+  const std = dist / z;
+  if (!(std > 0)) return null;
+  return std / Math.sqrt(units);
+}
+
+/** Inverse standard normal CDF (bisection on normCdf: simple, monotone, exact enough). */
+export function normInv(p: number): number | null {
+  if (!(p > 0) || !(p < 1)) return null;
+  let lo = -8;
+  let hi = 8;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (normCdf(mid) < p) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}

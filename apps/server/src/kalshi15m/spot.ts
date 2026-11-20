@@ -51,7 +51,12 @@ export interface TapeTrade {
 interface QuotePoint { ts: number; recvTs: number; mid: number; bid: number | null; ask: number | null }
 
 const RING_CAP = 2_000;      // ~65s of tick-level points per venue
+/** 1-second downsampled ring: 1500 entries = 25 minutes, i.e. a whole
+ *  15-minute window — the only way to measure window-scale vol at all. */
+const SEC_RING_CAP = 1_500;
 const TRADE_CAP = 4_000;
+/** minimum return pairs before a sigma window reports anything */
+const MIN_SIGMA_PAIRS = 20;
 /** 1s grid length used by lead/lag and volatility (seconds) */
 const GRID_WINDOW_S = 60;
 /**
@@ -100,6 +105,36 @@ export function corr(a: number[], b: number[]): number | null {
   return num / Math.sqrt(da * db);
 }
 
+/**
+ * Per-second sigma of log returns over the last `windowS` seconds from ANY
+ * timestamped point list (raw ticks or the 1-second downsample). Returns are
+ * normalized by sqrt(dt) so uneven spacing stays honest, and the window must
+ * actually be covered by history — a 60-second sigma silently extrapolated to
+ * a 15-minute contract is how a model ends up 5x away from the market.
+ */
+function sigmaOver(
+  points: Array<{ ts: number; mid: number }>, windowS: number, now: number,
+): number | null {
+  if (points.length < MIN_SIGMA_PAIRS + 1) return null;
+  const start = now - windowS * 1_000;
+  // history must reach the START of the window (1s slack for bucketing)
+  if (points[0].ts > start + 1_000) return null;
+  const rs: number[] = [];
+  let prev: { ts: number; mid: number } | null = null;
+  for (const p of points) {
+    if (p.ts < start) { prev = p; continue; }
+    if (prev !== null && prev.mid > 0 && p.mid > 0) {
+      const dt = (p.ts - prev.ts) / 1_000;
+      if (dt >= 0.4 && dt <= 5) rs.push(Math.log(p.mid / prev.mid) / Math.sqrt(dt));
+    }
+    prev = p;
+  }
+  if (rs.length < MIN_SIGMA_PAIRS) return null;
+  const mean = rs.reduce((s, v) => s + v, 0) / rs.length;
+  const varr = rs.reduce((s, v) => s + (v - mean) ** 2, 0) / rs.length;
+  return Math.sqrt(varr);
+}
+
 export interface SpotVenueState {
   venue: Venue;
   last: QuotePoint | null;
@@ -109,6 +144,17 @@ export interface SpotVenueState {
   returns: Partial<Record<Horizon, number | null>>;
   /** per-second stdev of 1s log returns over the last 60s (short-term vol) */
   sigma60: number | null;
+  /**
+   * Same measure over 5 and 15 minutes, from the 1-second downsampled ring.
+   * null while history is still shorter than the window — a 60-second sigma
+   * extrapolated to a 15-minute contract is exactly how a model ends up 5x
+   * away from the market's implied vol (observed live: model p 0.998 vs book
+   * 0.695).
+   */
+  sigma300: number | null;
+  sigma900: number | null;
+  /** seconds of 1s-downsampled history available right now */
+  historySec: number | null;
   trades1s: number;
   qty1s: number;
   buyPct1s: number | null;
@@ -135,6 +181,8 @@ export interface SpotSnapshot {
  */
 export class SpotTape {
   private readonly quotes = new Map<Venue, QuotePoint[]>();
+  /** one mid per wall-clock second — lives 25 minutes, covers a whole window */
+  private readonly secRing = new Map<Venue, Array<{ ts: number; mid: number }>>();
   private readonly trades: TapeTrade[] = [];
 
   observe(q: TapeTick): void {
@@ -150,6 +198,17 @@ export class SpotTape {
       bid: q.bid ?? null, ask: q.ask ?? null,
     });
     while (ring.length > RING_CAP) ring.shift();
+
+    // 1-second downsample: the LAST mid of each wall-clock second, so vol can
+    // be measured across a whole 15-minute window (the tick ring holds ~65s).
+    // Out-of-order stamps are ignored rather than corrupting the series.
+    let sec = this.secRing.get(q.venue);
+    if (!sec) { sec = []; this.secRing.set(q.venue, sec); }
+    const bucket = Math.floor(q.ts / 1000) * 1000;
+    const lastSec = sec[sec.length - 1];
+    if (!lastSec || bucket > lastSec.ts) sec.push({ ts: bucket, mid });
+    else if (bucket === lastSec.ts) lastSec.mid = mid;
+    while (sec.length > SEC_RING_CAP) sec.shift();
   }
 
   observeTrade(t: TapeTrade): void {
@@ -179,7 +238,8 @@ export class SpotTape {
       const sells = recent.filter((t) => t.side === 'sell').length;
       return {
         venue, last: null, spreadBps: null, stalenessMs: null, returns: {},
-        sigma60: null, trades1s: recent.length,
+        sigma60: null, sigma300: null, sigma900: null, historySec: null,
+        trades1s: recent.length,
         qty1s: recent.reduce((s, t) => s + t.qty, 0),
         buyPct1s: buys + sells > 0 ? buys / (buys + sells) : null,
         points: 0,
@@ -194,6 +254,9 @@ export class SpotTape {
       stalenessMs: now - cur.recvTs,
       returns: {},
       sigma60: null,
+      sigma300: null,
+      sigma900: null,
+      historySec: null,
       trades1s: 0,
       qty1s: 0,
       buyPct1s: null,
@@ -201,24 +264,13 @@ export class SpotTape {
     };
     for (const h of HORIZONS) state.returns[h] = logReturn(now, cur.mid, ring, h);
 
-    // per-second sigma over the last 60s from 1s-bucketed returns
-    const buckets: number[] = [];
-    const start = now - 60_000;
-    let prev: QuotePoint | null = null;
-    for (let i = 0; i < ring.length; i++) {
-      const p = ring[i];
-      if (p.ts < start) { prev = p; continue; }
-      if (prev && prev.mid > 0 && p.mid > 0) {
-        const secs = (p.ts - prev.ts) / 1_000;
-        if (secs >= 0.4 && secs <= 3) buckets.push(Math.log(p.mid / prev.mid) / Math.sqrt(secs));
-      }
-      prev = p;
-    }
-    if (buckets.length >= 5) {
-      const mean = buckets.reduce((s, v) => s + v, 0) / buckets.length;
-      const varr = buckets.reduce((s, v) => s + (v - mean) ** 2, 0) / buckets.length;
-      state.sigma60 = Math.sqrt(varr);
-    }
+    // three vol windows: 60s from raw ticks (fills fastest), 5 and 15 minutes
+    // from the 1-second ring — null until that much history actually exists
+    state.sigma60 = sigmaOver(ring, 60, now);
+    const sec = this.secRing.get(venue) ?? [];
+    state.historySec = sec.length >= 2 ? Math.min(now - sec[0].ts, SEC_RING_CAP * 1_000) : null;
+    state.sigma300 = sigmaOver(sec, 300, now);
+    state.sigma900 = sigmaOver(sec, 900, now);
 
     const recent = this.trades.filter((t) => t.venue === venue && t.ts >= now - 1_000);
     state.trades1s = recent.length;
@@ -560,6 +612,9 @@ export class SpotRuntime {
       spreadBps: s.spreadBps,
       returns: s.returns,
       sigma60: s.sigma60,
+      sigma300: s.sigma300,
+      sigma900: s.sigma900,
+      historySec: s.historySec,
       trades1s: s.trades1s,
       qty1s: s.qty1s,
       buyPct1s: s.buyPct1s,

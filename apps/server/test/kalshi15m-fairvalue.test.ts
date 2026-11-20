@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fairValue, modelEdge, normCdf, settlementVariance, tauSeconds,
+  fairValue, impliedSigma, modelEdge, normCdf, normInv, settlementVariance, tauSeconds,
 } from '../src/kalshi15m/fairvalue.ts';
 
 test('settlement variance: tau>=60 collapses to v*(tau-40), verified against the tape study', () => {
@@ -124,6 +124,40 @@ test('fairValue: missing inputs produce null + a reason, never a plausible guess
   assert.equal(fairValue({ spot: 59_000, strike: 59_000, tauSec: 0, sigmaPerSec: 0.0001 }).reason, 'window_closed');
   assert.equal(fairValue({ spot: 59_000, strike: 59_000, tauSec: 300, sigmaPerSec: null }).reason, 'no_sigma');
   assert.equal(fairValue({ spot: 59_000, strike: 59_000, tauSec: 300, sigmaPerSec: 0 }).reason, 'no_sigma');
+});
+
+test('impliedSigma inverts the model — the calibration instrument', () => {
+  const sigma = 0.0004;
+  const tau = 600;
+  const spot = 59_150;
+  const strike = 59_000;
+  const fv = fairValue({ spot, strike, tauSec: tau, sigmaPerSec: sigma });
+  assert.ok(fv.pYes !== null && fv.pYes > 0.5);
+  const back = impliedSigma(fv.pYes, spot, strike, tau);
+  assert.ok(back !== null, 'a decisive-but-not-saturated p inverts cleanly');
+  assert.ok(Math.abs(back / sigma - 1) < 1e-4, `round trip ${back} vs ${sigma}`);
+});
+
+test('impliedSigma refuses inversions that carry no information', () => {
+  assert.equal(impliedSigma(0.5, 59_000, 59_000, 300), null, 'at the money: every sigma fits');
+  assert.equal(impliedSigma(0.49, 59_000, 59_000, 300), null, 'z below the floor');
+  assert.equal(impliedSigma(0.2, 59_100, 59_000, 300), null,
+    'sign mismatch: book prices DOWN while spot is ABOVE strike — a data problem, not a vol');
+  assert.equal(impliedSigma(null, 59_100, 59_000, 300), null);
+  assert.equal(impliedSigma(0.9, null, 59_000, 300), null);
+  assert.equal(impliedSigma(0.9, 59_100, 59_000, 0), null, 'window closed');
+  assert.equal(impliedSigma(0.9, 59_100, 59_000, null), null);
+});
+
+test('normInv round-trips normCdf', () => {
+  for (const p of [0.025, 0.1, 0.3, 0.5, 0.7, 0.9, 0.975]) {
+    const x = normInv(p);
+    assert.ok(x !== null, `p=${p}`);
+    assert.ok(Math.abs(normCdf(x) - p) < 1e-6, `p=${p} -> ${x} -> ${normCdf(x)}`);
+  }
+  assert.equal(normInv(0), null, 'open interval only');
+  assert.equal(normInv(1), null);
+  assert.equal(normInv(-0.1), null);
 });
 
 test('modelEdge and tauSeconds', () => {

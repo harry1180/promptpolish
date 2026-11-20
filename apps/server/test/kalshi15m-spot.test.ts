@@ -147,6 +147,34 @@ test('lead/lag: a venue that moves 2s earlier is detected as the leader', () => 
   assert.equal(tape3.leadLag(T0 + 4_000).venue, null);
 });
 
+test('vol windows: sigma300/sigma900 stay null until that history exists', () => {
+  const tape = new SpotTape();
+  feed(tape, 'kraken', walk(120, 5), T0, 1_000); // two minutes only
+  const s = tape.snapshot(T0 + 119_000).kraken;
+  assert.ok(s);
+  assert.ok(s.sigma60 !== null, '60s of history is available');
+  assert.equal(s.sigma300, null, 'no 5-minute history -> null, never extrapolated');
+  assert.equal(s.sigma900, null, 'no 15-minute history -> null, never extrapolated');
+  assert.ok((s.historySec ?? 0) > 100_000, `history reported in ms-ish scale: ${s.historySec}`);
+});
+
+test('vol windows: a full-window tape yields sigma900 and scales with amplitude', () => {
+  const build = (scale: number): SpotTape => {
+    const t = new SpotTape();
+    feed(t, 'kraken', walk(950, 5).map((p) => 100_000 + (p - 100_000) * scale), T0, 1_000);
+    return t;
+  };
+  const now = T0 + 949_000;
+  const a = build(1).snapshot(now).kraken;
+  const b = build(3).snapshot(now).kraken;
+  assert.ok(a && b);
+  assert.ok(a.sigma900 !== null, 'a 15-minute tape gives a 15-minute sigma');
+  assert.ok(a.sigma300 !== null, 'and a 5-minute one');
+  assert.ok(b.sigma900 !== null);
+  const ratio = (b.sigma900 as number) / (a.sigma900 as number);
+  assert.ok(ratio > 2.7 && ratio < 3.3, `3x amplitude -> ~3x sigma, got ${ratio}`);
+});
+
 test('volatility: sigma over the last 60s responds to the size of the moves', () => {
   const calm = new SpotTape();
   feed(calm, 'kraken', walk(70, 3).map((p) => 100_000 + (p - 100_000) * 0.000_1), T0, 1_000);

@@ -24,7 +24,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { KalshiBook, type BookMetrics, type TradePrint } from './book.ts';
-import { fairValue, modelEdge } from './fairvalue.ts';
+import { fairValue, impliedSigma, modelEdge } from './fairvalue.ts';
 import { KalshiRest, KalshiWs, KXBTC15M, loadCreds, type AuthConfig, type KalshiCreds, type StreamSocket } from './client.ts';
 import {
   eventOfMarket, msToClose, phaseAt, windowFromRest,
@@ -93,6 +93,8 @@ export interface SpotRef {
   spot: number | null;
   /** per-second log-return sigma from the tape */
   sigmaPerSec: number | null;
+  /** which realized-sigma window produced it: 60 / 300 / 900 seconds */
+  sigmaWindowSec: number | null;
   /** which venue produced the number — always surfaced, never hidden */
   approx: string | null;
 }
@@ -105,8 +107,12 @@ export interface K15mDeps {
   socketFactory?: (url: string, headers: Record<string, string>) => StreamSocket;
   now?: () => number;
   fetchImpl?: typeof fetch;
-  /** settlement fair-value inputs; absent = no fair value is recorded (nulls) */
-  spotRef?: (now: number) => SpotRef;
+  /**
+   * settlement fair-value inputs; absent = no fair value is recorded (nulls).
+   * `tauSec` (seconds to close) lets the caller pick a realized-sigma window
+   * no longer than the part of the contract that has already elapsed.
+   */
+  spotRef?: (now: number, tauSec: number) => SpotRef;
 }
 
 export class K15mRuntime {
@@ -135,7 +141,7 @@ export class K15mRuntime {
   private phase: WindowPhase | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
-  private readonly spotRef: ((now: number) => SpotRef) | undefined;
+  private readonly spotRef: ((now: number, tauSec: number) => SpotRef) | undefined;
   private started = false;
 
   constructor(deps: K15mDeps) {
@@ -453,14 +459,16 @@ export class K15mRuntime {
    */
   private computeFair(now: number, bounds: WindowBounds, m: BookMetrics): SampleFair | null {
     if (!this.spotRef) return null;
-    const ref = this.spotRef(now);
+    const strike = this.current?.strike ?? null;
+    const tauSec = msToClose(bounds, now) / 1_000;
+    const ref = this.spotRef(now, tauSec);
     const impliedMid = m.bestBid !== null && m.bestAsk !== null
       ? (m.bestBid + m.bestAsk) / 2
       : null;
     const fv = fairValue({
       spot: ref.spot,
-      strike: this.current?.strike ?? null,
-      tauSec: msToClose(bounds, now) / 1_000,
+      strike,
+      tauSec,
       sigmaPerSec: ref.sigmaPerSec,
       approx: ref.approx,
     });
@@ -473,6 +481,9 @@ export class K15mRuntime {
       edgePp: edge === null ? null : edge * 100,
       reason: fv.reason ?? null,
       approx: ref.approx,
+      // calibration: what sigma the BOOK already believes, next to ours
+      sigmaImplied: impliedSigma(impliedMid, ref.spot, strike, tauSec),
+      sigmaWindowSec: ref.sigmaWindowSec,
     };
   }
 

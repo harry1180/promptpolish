@@ -200,13 +200,29 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
   const k15m = new K15mRuntime({
     db: cryptoRuntime.db,
     config: k15mConfigFromEnv(),
-    spotRef: (now: number) => {
+    spotRef: (now: number, tauSec: number) => {
       const snap = spot.tape.snapshot(now);
       const ok = (s: typeof snap.coinbase): boolean =>
         s !== null && s.last !== null && s.stalenessMs !== null && s.stalenessMs < 5_000;
       const pick = ok(snap.coinbase) ? snap.coinbase : ok(snap.kraken) ? snap.kraken : null;
-      if (!pick || !pick.last) return { spot: null, sigmaPerSec: null, approx: null };
-      return { spot: pick.last.mid, sigmaPerSec: pick.sigma60, approx: pick.venue };
+      if (!pick || !pick.last) {
+        return { spot: null, sigmaPerSec: null, sigmaWindowSec: null, approx: null };
+      }
+      // Sigma window must never outlive the part of the contract that has
+      // ALREADY elapsed (elapsed = 900s - time left, floored at 60s), and we
+      // take the longest window with real history — a 60s sigma stretched to
+      // 15 minutes is what produced the 5x model/market gap seen live.
+      const elapsed = Math.max(60, Math.min(900, 900 - tauSec));
+      const ladder: Array<[number, number | null]> = [
+        [900, pick.sigma900], [300, pick.sigma300], [60, pick.sigma60],
+      ];
+      for (const [windowSec, sigma] of ladder) {
+        if (windowSec <= elapsed && sigma !== null) {
+          return { spot: pick.last.mid, sigmaPerSec: sigma, sigmaWindowSec: windowSec, approx: pick.venue };
+        }
+      }
+      // fresh process: no vol history yet -> no sigma, hence no fair value
+      return { spot: pick.last.mid, sigmaPerSec: null, sigmaWindowSec: null, approx: pick.venue };
     },
   });
   k15m.start();

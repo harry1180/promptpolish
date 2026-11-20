@@ -61,7 +61,7 @@ function makeRuntime(opts: {
   market?: Record<string, unknown>;
   marketCalls?: Array<Record<string, unknown>>;
   configPatch?: Partial<K15mConfig>;
-  spotRef?: (now: number) => { spot: number | null; sigmaPerSec: number | null; approx: string | null };
+  spotRef?: (now: number, tauSec: number) => { spot: number | null; sigmaPerSec: number | null; sigmaWindowSec: number | null; approx: string | null };
 } = {}): { rt: K15mRuntime; sock: FakeSocket; now: { t: number }; db: DatabaseSync; restCalls: string[] } {
   const db = new DatabaseSync(':memory:');
   const now = { t: T0 };
@@ -266,7 +266,7 @@ test('rollover: a new window replaces the current one and is persisted', async (
 
 test('module 3: fair value + model edge recorded with every sample', async () => {
   const { rt, sock, now, db } = makeRuntime({
-    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0002, approx: 'coinbase' }),
+    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0002, sigmaWindowSec: 60, approx: 'coinbase' }),
   });
   await rt.discover();
   rt.ws.start();
@@ -287,6 +287,9 @@ test('module 3: fair value + model edge recorded with every sample', async () =>
   assert.ok(Math.abs((row.edge_pp as number) - (((row.fair_yes as number) - 0.435) * 100)) < 1e-6,
     'edge_pp is exactly (p_yes - implied_mid) * 100');
   assert.equal(row.fair_reason, null, 'inputs were complete, so no reason is recorded');
+  assert.equal(row.fair_sigma_window, 60, 'the sigma window used is on the record');
+  assert.equal(row.sigma_implied, null,
+    'book mid 0.435 prices DOWN while spot is above strike -> sign mismatch, no fake vol number');
 
   // the live status block carries the same numbers
   const st = rt.status(now.t) as { fairValue: Record<string, unknown> | null };
@@ -300,7 +303,7 @@ test('module 3: fair value + model edge recorded with every sample', async () =>
 
 test('module 3: a missing spot source records the reason, not a number', async () => {
   const { rt, sock, now, db } = makeRuntime({
-    spotRef: () => ({ spot: null, sigmaPerSec: null, approx: null }),
+    spotRef: () => ({ spot: null, sigmaPerSec: null, sigmaWindowSec: null, approx: null }),
   });
   await rt.discover();
   rt.ws.start();
