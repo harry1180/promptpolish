@@ -79,6 +79,8 @@ export interface K15mConfig {
   stratF: MakerConfig;
   /** how often every shadow strategy is evaluated (ms) — 1s bounds the log */
   stratAEvalMs: number;
+  /** how often settled windows are collected (ms) — outcomes feed the backtest */
+  outcomeMs: number;
   auth: AuthConfig;
 }
 
@@ -114,6 +116,7 @@ export function k15mConfigFromEnv(env: Record<string, string | undefined> = proc
     stratE: lateFavConfigFromEnv(env),
     stratF: makerConfigFromEnv(env),
     stratAEvalMs: num(env.KALSHI15M_A_EVAL_MS, 1_000),
+    outcomeMs: num(env.KALSHI15M_OUTCOME_MS, 60_000),
     auth: {
       apiKeyId: env.KALSHI_API_KEY_ID,
       privateKeyPath: env.KALSHI_PRIVATE_KEY_PATH,
@@ -168,6 +171,7 @@ export class K15mRuntime {
     discovers: 0, discoverErrors: 0, rollOvers: 0,
     samples: 0, trades: 0, duplicateTrades: 0,
     seqGaps: 0, snapshotRecoveries: 0, restRecoveries: 0,
+    outcomes: 0, outcomeErrors: 0,
     frames: 0, bookFrames: 0, tradeFrames: 0,
     lastFrameAt: 0, lastError: null as string | null,
     lastSnapshotAt: 0,
@@ -189,6 +193,7 @@ export class K15mRuntime {
   /** (ts, spot, mid) history for Strategy A's repricing-lag lookback */
   private readonly lagRing: Array<{ ts: number; spot: number | null; mid: number | null; agree: boolean | null }> = [];
   private lastStratAEvalAt = 0;
+  private lastOutcomeAt = 0;
   readonly stratAStats = { evaluated: 0, traded: 0, skipped: 0, lastVerdict: null as string | null, lastNetPp: null as number | null };
   /** per-strategy shadow counters (B..F; A keeps stratAStats for compatibility) */
   readonly shadowByStrategy: Record<string, { evaluated: number; traded: number }> = {};
@@ -295,6 +300,9 @@ export class K15mRuntime {
 
     if (now - this.lastHealthAt >= this.config.healthMs) {
       this.writeHealth(now, phase, book);
+    }
+    if (now - this.lastOutcomeAt >= this.config.outcomeMs) {
+      void this.collectOutcomes(now);
     }
     if (now - this.lastPruneAt >= 3_600_000) {
       this.lastPruneAt = now;
@@ -638,6 +646,40 @@ export class K15mRuntime {
     };
   }
 
+  /**
+   * Collect SETTLED windows for this series: the official result plus the
+   * BRTI value Kalshi resolved on (`expiration_value`). Outcomes are what
+   * make hold-to-settlement scoring — and any honest backtest — possible;
+   * without them only round trips can be measured. A failure never disturbs
+   * the feed: it is counted and retried next interval.
+   */
+  async collectOutcomes(now = this.now()): Promise<number> {
+    this.lastOutcomeAt = now;
+    try {
+      const body = await this.rest.markets(this.config.series, 'settled', 25);
+      let recorded = 0;
+      for (const m of body.markets ?? []) {
+        const eventTicker = eventOfMarket(m.ticker ?? '');
+        if (!eventTicker) continue;
+        const derived = deriveSettlement(m);
+        if (!derived) continue;
+        const res = this.db.prepare(
+          `UPDATE k15m_windows SET settled_result = ?, settle_value = ?, settle_note = ?,
+              settled_at = ?, status = 'settled', phase = 'EXPIRED', updated_ts = ?
+            WHERE event_ticker = ? AND (settled_result IS NULL OR settled_result = '')`,
+        ).run(
+          derived.result, derived.settleValue, derived.source, now, now, eventTicker,
+        );
+        if (Number(res.changes) > 0) { recorded += 1; this.stats.outcomes += 1; }
+      }
+      return recorded;
+    } catch (err) {
+      this.stats.outcomeErrors += 1;
+      this.stats.lastError = err instanceof Error ? err.message : String(err);
+      return 0;
+    }
+  }
+
   /* ---------------------------------------------------------------- */
   /* Shadow strategies: A..F, one pass per eval window                 */
   /* ---------------------------------------------------------------- */
@@ -919,4 +961,28 @@ export function chooseSigma(
   return realized >= implied
     ? { sigma: realized, source: 'max/realized' }
     : { sigma: implied, source: 'max/implied' };
+}
+
+/**
+ * Settlement of one settled Kalshi market — PURE.
+ * Kalshi's own `result` wins when present; otherwise the official rule decides
+ * (YES iff the closing BRTI average `expiration_value` >= the opening average
+ * `floor_strike`, tie to YES). Returns null when the market carries no usable
+ * outcome — never a guessed result.
+ */
+export function deriveSettlement(m: {
+  result?: string; expiration_value?: string; floor_strike?: number;
+}): { result: 'YES' | 'NO'; settleValue: number | null; source: string } | null {
+  const raw = (m.result ?? '').trim().toLowerCase();
+  const settleValue = m.expiration_value !== undefined && m.expiration_value !== ''
+    ? Number(m.expiration_value)
+    : null;
+  const usableValue = settleValue !== null && Number.isFinite(settleValue) ? settleValue : null;
+  if (raw === 'yes' || raw === 'y') return { result: 'YES', settleValue: usableValue, source: 'kalshi_result' };
+  if (raw === 'no' || raw === 'n') return { result: 'NO', settleValue: usableValue, source: 'kalshi_result' };
+  const strike = typeof m.floor_strike === 'number' ? m.floor_strike : null;
+  if (usableValue !== null && strike !== null && Number.isFinite(strike)) {
+    return { result: usableValue >= strike ? 'YES' : 'NO', settleValue: usableValue, source: 'rule_derived' };
+  }
+  return null;
 }

@@ -89,7 +89,10 @@ export interface RestMarket {
   rules_primary?: string;
   volume_fp?: string;
   open_interest_fp?: string;
+  /** 'yes' | 'no' once the market is settled (empty string while live) */
   result?: string;
+  /** official settlement value (the BRTI average Kalshi resolved on) */
+  expiration_value?: string;
 }
 
 export interface RestClientOptions {

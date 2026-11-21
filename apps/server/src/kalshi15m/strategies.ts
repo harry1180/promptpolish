@@ -175,8 +175,12 @@ export function evaluateLeadLag(input: LeadLagInput): LeadLagVerdict {
 /* Shared: verdict shape + cost helpers used by every strategy         */
 /* ================================================================== */
 
-/** Every strategy returns this shape so one storage path can hold them all. */
-export type StrategyVerdict = LeadLagVerdict;
+/**
+ * Every strategy returns this shape so one storage path can hold them all.
+ * Widened from LeadLagVerdict: `strategy` is a free string (B..F carry their
+ * own names), everything else is identical.
+ */
+export type StrategyVerdict = Omit<LeadLagVerdict, 'strategy'> & { strategy: string };
 
 /** Round-trip cost of taking a side on the YES book, in cents per contract. */
 export function sideCost(side: 'YES' | 'NO', yesBid: number, yesAsk: number): number {

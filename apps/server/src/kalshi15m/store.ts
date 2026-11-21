@@ -129,6 +129,12 @@ CREATE TABLE IF NOT EXISTS k15m_signals (
 CREATE INDEX IF NOT EXISTS idx_k15m_signals_ts ON k15m_signals(ts);
 CREATE INDEX IF NOT EXISTS idx_k15m_signals_verdict ON k15m_signals(verdict, ts);`;
 
+/** Columns added to k15m_windows after it first shipped. */
+const K15M_WINDOW_MIGRATION: Array<[string, string]> = [
+  ['settle_value', 'REAL'],   // official BRTI value Kalshi settled on
+  ['settled_at', 'INTEGER'],
+];
+
 /** Columns added after the table first shipped (existing DBs get them too). */
 const K15M_SAMPLE_MIGRATION: Array<[string, string]> = [
   ['fair_spot', 'REAL'],
@@ -154,6 +160,13 @@ export function ensureK15mTables(db: DatabaseSync): void {
   );
   for (const [name, type] of K15M_SAMPLE_MIGRATION) {
     if (!cols.has(name)) db.exec(`ALTER TABLE k15m_book_samples ADD COLUMN ${name} ${type}`);
+  }
+  const wcols = new Set(
+    (db.prepare('PRAGMA table_info(k15m_windows)').all() as unknown as Array<{ name: string }>)
+      .map((c) => c.name),
+  );
+  for (const [name, type] of K15M_WINDOW_MIGRATION) {
+    if (!wcols.has(name)) db.exec(`ALTER TABLE k15m_windows ADD COLUMN ${name} ${type}`);
   }
 }
 
@@ -206,12 +219,26 @@ export function updateWindowQuotes(
   ).run(q.yesBid ?? null, q.yesAsk ?? null, q.volume ?? null, q.openInterest ?? null, now, eventTicker);
 }
 
-export function setWindowResult(db: DatabaseSync, eventTicker: string, result: string, note: string | null, now: number): void {
+export function setWindowResult(
+  db: DatabaseSync, eventTicker: string, result: string, note: string | null,
+  now: number, settleValue: number | null = null,
+): void {
   db.prepare(
-    `UPDATE k15m_windows SET settled_result = ?, settle_note = ?, status = 'settled', phase = 'EXPIRED',
-        updated_ts = ?
+    `UPDATE k15m_windows SET settled_result = ?, settle_note = ?, settle_value = COALESCE(?, settle_value),
+        settled_at = ?, status = 'settled', phase = 'EXPIRED', updated_ts = ?
       WHERE event_ticker = ? AND (settled_result IS NULL OR settled_result = '')`,
-  ).run(result, note, now, eventTicker);
+  ).run(result, note, settleValue, now, now, eventTicker);
+}
+
+/**
+ * How many windows we have outcomes for — the denominator every settlement
+ * metric needs. 0 means the backtester can only score round trips.
+ */
+export function settledWindowCount(db: DatabaseSync): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS n FROM k15m_windows WHERE settled_result IS NOT NULL AND settled_result <> ''`,
+  ).get() as { n: number };
+  return Number(row.n);
 }
 
 /** Settlement fair value recorded with the sample (module 3, APPROXIMATION). */
