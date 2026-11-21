@@ -32,6 +32,7 @@ import {
   type MomentumConfig, type PanicConfig, type StrategyVerdict,
 } from './strategies.ts';
 import { bookSpotDisagree, fairValue, impliedSigma, modelEdge } from './fairvalue.ts';
+import { PaperEngine, paperConfigFromEnv, type PaperBookView, type PaperConfig } from './paper.ts';
 import { KalshiRest, KalshiWs, KXBTC15M, loadCreds, type AuthConfig, type KalshiCreds, type StreamSocket } from './client.ts';
 import {
   eventOfMarket, msToClose, phaseAt, windowFromRest,
@@ -81,6 +82,8 @@ export interface K15mConfig {
   stratAEvalMs: number;
   /** how often settled windows are collected (ms) — outcomes feed the backtest */
   outcomeMs: number;
+  /** paper execution layer: state machine + risk limits, simulated fills only */
+  paper: PaperConfig;
   auth: AuthConfig;
 }
 
@@ -117,6 +120,7 @@ export function k15mConfigFromEnv(env: Record<string, string | undefined> = proc
     stratF: makerConfigFromEnv(env),
     stratAEvalMs: num(env.KALSHI15M_A_EVAL_MS, 1_000),
     outcomeMs: num(env.KALSHI15M_OUTCOME_MS, 60_000),
+    paper: paperConfigFromEnv(env),
     auth: {
       apiKeyId: env.KALSHI_API_KEY_ID,
       privateKeyPath: env.KALSHI_PRIVATE_KEY_PATH,
@@ -194,6 +198,10 @@ export class K15mRuntime {
   private readonly lagRing: Array<{ ts: number; spot: number | null; mid: number | null; agree: boolean | null }> = [];
   private lastStratAEvalAt = 0;
   private lastOutcomeAt = 0;
+  /** local arrival time of the newest book frame — the paper staleness gate */
+  private lastBookFrameAt = 0;
+  /** paper execution: built always (tables ready), actives only when enabled */
+  readonly paper: PaperEngine;
   readonly stratAStats = { evaluated: 0, traded: 0, skipped: 0, lastVerdict: null as string | null, lastNetPp: null as number | null };
   /** per-strategy shadow counters (B..F; A keeps stratAStats for compatibility) */
   readonly shadowByStrategy: Record<string, { evaluated: number; traded: number }> = {};
@@ -205,6 +213,9 @@ export class K15mRuntime {
     this.spotRef = deps.spotRef;
     this.config = deps.config ?? k15mConfigFromEnv();
     ensureK15mTables(this.db);
+    // paper engine: tables are created even while disabled so enabling it is
+    // a config flip, never a migration on a live feed
+    this.paper = new PaperEngine(this.db, this.config.paper);
     const creds = deps.creds !== undefined ? deps.creds : loadCreds(this.config.auth);
     this.rest = deps.rest ?? new KalshiRest({ creds, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) });
     this.ws = new KalshiWs({
@@ -304,6 +315,7 @@ export class K15mRuntime {
     if (now - this.lastOutcomeAt >= this.config.outcomeMs) {
       void this.collectOutcomes(now);
     }
+    if (this.config.paper.enabled) this.runPaperManage(now, book);
     if (now - this.lastPruneAt >= 3_600_000) {
       this.lastPruneAt = now;
       pruneK15m(this.db, this.config.retentionDays, now);
@@ -372,6 +384,7 @@ export class K15mRuntime {
 
   private onBook(frame: Record<string, unknown>): void {
     this.stats.frames += 1;
+    this.lastBookFrameAt = this.now();
     this.stats.bookFrames += 1;
     this.stats.lastFrameAt = this.now();
     const msg = frame.msg as Record<string, unknown> | undefined;
@@ -670,7 +683,14 @@ export class K15mRuntime {
         ).run(
           derived.result, derived.settleValue, derived.source, now, now, eventTicker,
         );
-        if (Number(res.changes) > 0) { recorded += 1; this.stats.outcomes += 1; }
+        if (Number(res.changes) > 0) {
+          recorded += 1;
+          this.stats.outcomes += 1;
+          // RECONCILE: close any paper position that rode this window to settlement
+          for (const p of this.paper.openPositions()) {
+            if (p.eventTicker === eventTicker) this.paper.settle(p, derived.result, now);
+          }
+        }
       }
       return recorded;
     } catch (err) {
@@ -678,6 +698,30 @@ export class K15mRuntime {
       this.stats.lastError = err instanceof Error ? err.message : String(err);
       return 0;
     }
+  }
+
+  /** Executable view of the current book for the paper engine (never midpoints). */
+  private paperBook(now: number, book: KalshiBook | undefined): PaperBookView | null {
+    if (!book || book.needsSnapshot || book.isEmpty) return null;
+    const m = book.metrics({ now });
+    if (m.bestBid === null || m.bestAsk === null || !(m.bestBid > 0) || !(m.bestAsk > m.bestBid)) {
+      return null; // no two-sided market -> nothing is executable
+    }
+    return {
+      yesBid: m.bestBid, yesAsk: m.bestAsk,
+      // resting size at the touch, converted to dollars: the fill cap is the
+      // displayed depth, not an assumed deep book
+      depthBidDollars: m.bestBidSize * m.bestBid,
+      depthAskDollars: m.bestAskSize * m.bestAsk,
+      ageMs: this.lastBookFrameAt > 0 ? Math.max(0, now - this.lastBookFrameAt) : 999_999,
+    };
+  }
+
+  /** MANAGE: every open paper position against the live book, each tick. */
+  private runPaperManage(now: number, book: KalshiBook | undefined): void {
+    const pb = this.paperBook(now, book);
+    if (!pb) return;
+    for (const pos of this.paper.openPositions()) this.paper.manage(pos, pb, now);
   }
 
   /* ---------------------------------------------------------------- */
@@ -737,6 +781,13 @@ export class K15mRuntime {
     bucket.evaluated += 1;
     if (v.verdict === 'TRADE') bucket.traded += 1;
     this.shadowByStrategy[v.strategy] = bucket;
+    // PAPER: a taken signal enters the state machine here. Fills are
+    // simulated against this very book (ask/bid, depth-capped) and the
+    // module has no order call of any kind.
+    if (this.config.paper.enabled && v.verdict === 'TRADE' && this.current) {
+      const pb = this.paperBook(now, this.books.get(this.current.marketTicker));
+      if (pb) this.paper.enter(v, this.current.eventTicker, this.current.marketTicker, pb, now);
+    }
   }
 
   /**
@@ -921,8 +972,12 @@ export class K15mRuntime {
           C: this.config.stratC.enabled, D: this.config.stratD.enabled,
           E: this.config.stratE.enabled, F: this.config.stratF.enabled,
         },
-        byStrategy: this.shadowByStrategy,
+        shadowStrategies: this.shadowByStrategy,
       },
+      /** PAPER execution (simulated fills only) — Phase 6/7/9 status */
+      paper: this.config.paper.enabled
+        ? this.paper.summary()
+        : { enabled: false, note: 'KALSHI15M_PAPER is off' },
       /** sigma policy in force — an edge is only meaningful with this in view */
       sigmaPolicy: {
         source: this.config.sigmaSource,

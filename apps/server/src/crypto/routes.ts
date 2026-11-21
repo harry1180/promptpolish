@@ -468,6 +468,17 @@ export async function handleCrypto(
           },
         });
       }
+      if (rest[1] === 'paper') {
+        if (!k) return done({ status: 200, body: { enabled: false } });
+        return done({
+          status: 200,
+          body: {
+            ok: true,
+            mode: 'PAPER — simulated fills, no order path exists in this engine',
+            ...(k.paper.summary() as unknown as Record<string, unknown>),
+          },
+        });
+      }
       if (rest[1] === 'calibration') {
         if (!k) {
           return done({ status: 200, body: { enabled: false, note: 'K15mRuntime not constructed in this process' } });

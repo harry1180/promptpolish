@@ -103,6 +103,12 @@ services:
       KALSHI15M_STRAT_D: "1"
       KALSHI15M_STRAT_E: "1"
       KALSHI15M_STRAT_F: "1"
+      # PAPER execution (Phase 6/7/9): simulated fills only — this engine has
+      # no order call anywhere. $1,000 paper bankroll, 0.25%/trade, 2% daily
+      # loss cap, 5% exposure cap, 1 position per market, >=2c net edge,
+      # 10s time exit / 5c stop / 10c take, 5s re-entry cooldown.
+      KALSHI15M_PAPER: "1"
+      KALSHI15M_PAPER_BANKROLL: "100000"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"
