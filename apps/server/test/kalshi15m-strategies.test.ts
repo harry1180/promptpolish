@@ -7,7 +7,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  evaluateLeadLag, leadLagConfigFromEnv, type LeadLagConfig, type LeadLagInput,
+  evaluateLeadLag, evaluateMaker, evaluateMomentum, evaluateMicro, evaluateLateFav,
+  evaluatePanicFade, lateFavConfigFromEnv, leadLagConfigFromEnv, makerConfigFromEnv,
+  microConfigFromEnv, momentumConfigFromEnv, panicConfigFromEnv,
+  type LeadLagConfig, type LeadLagInput,
 } from '../src/kalshi15m/strategies.ts';
 import { ensureK15mTables, insertSignal, recentSignals, signalSummary } from '../src/kalshi15m/store.ts';
 
@@ -187,4 +190,158 @@ test('shadow storage: every verdict lands with its reasons, and the summary coun
   const filtered = recentSignals(db, 10, 'A_LEADLAG');
   assert.equal(filtered.length, 2, 'filterable by strategy');
   db.close();
+});
+
+/* ------------------------------------------------------------------ */
+/* B..F — one block per strategy, same shadow discipline               */
+/* ------------------------------------------------------------------ */
+
+test('config: B..F all default OFF with their own conservative knobs', () => {
+  const e: Record<string, string | undefined> = {};
+  assert.equal(microConfigFromEnv(e).enabled, false);
+  assert.equal(microConfigFromEnv(e).costModel, 'TAKER', 'crossing the book is the default assumption');
+  assert.equal(microConfigFromEnv({ KALSHI15M_B_COST_MODEL: 'MAKER' }).costModel, 'MAKER');
+  assert.equal(microConfigFromEnv({ KALSHI15M_B_COST_MODEL: 'bogus' }).costModel, 'TAKER', 'never fuzzy-matched');
+  assert.equal(panicConfigFromEnv(e).enabled, false);
+  assert.equal(panicConfigFromEnv(e).reboundFraction, 0.5, 'stated assumption, not a measurement');
+  assert.equal(momentumConfigFromEnv(e).enabled, false);
+  assert.equal(momentumConfigFromEnv(e).continuation, 0.5);
+  assert.equal(momentumConfigFromEnv(e).requireAgreement, true);
+  assert.equal(lateFavConfigFromEnv(e).enabled, false);
+  assert.equal(lateFavConfigFromEnv(e).variant, 'HOLD');
+  assert.equal(lateFavConfigFromEnv({ KALSHI15M_E_VARIANT: 'EXIT' }).variant, 'EXIT');
+  assert.equal(lateFavConfigFromEnv({ KALSHI15M_E_VARIANT: 'bogus' }).variant, 'HOLD');
+  assert.equal(makerConfigFromEnv(e).enabled, false);
+});
+
+test('B microstructure: flow gates first, then the cost model decides', () => {
+  const cfg = microConfigFromEnv({});
+  const base = {
+    tauSec: 300, mid: 0.5, micro: 0.505, imbalance: 0.4, ofi: 0.5,
+    takerBias60s: 0.3, yesBid: 0.495, yesAsk: 0.505,
+  };
+  assert.equal(evaluateMicro({ cfg, ...base, tauSec: 10 }).skipReason, 'too_close_to_settlement');
+  assert.equal(evaluateMicro({ cfg, ...base, mid: null }).skipReason, 'no_microprice');
+  assert.equal(evaluateMicro({ cfg, ...base, yesBid: 0.505, yesAsk: 0.495 }).skipReason, 'no_executable_book');
+  assert.equal(evaluateMicro({ cfg, ...base, micro: 0.5 }).skipReason, 'micro_flat');
+  assert.equal(evaluateMicro({ cfg, ...base, imbalance: 0.1 }).skipReason, 'imbalance_too_weak');
+  assert.equal(evaluateMicro({ cfg, ...base, imbalance: -0.4 }).skipReason, 'flow_disagreement');
+  assert.equal(evaluateMicro({ cfg, ...base, ofi: 0.1 }).skipReason, 'ofi_too_weak');
+  assert.equal(evaluateMicro({ cfg, ...base, ofi: -0.5 }).skipReason, 'ofi_disagreement');
+  assert.equal(evaluateMicro({ cfg, ...base, takerBias60s: -0.5 }).skipReason, 'taker_flow_disagreement');
+
+  // As a TAKER the microprice gap (<= half the spread) can never beat the
+  // round trip: the shadow proves it instead of us asserting it.
+  const taker = evaluateMicro({ cfg, ...base });
+  assert.equal(taker.skipReason, 'edge_below_cost');
+  assert.equal(taker.side, 'YES');
+  assert.ok((taker.costPp ?? 0) > 4, 'spread + two taker fees');
+  assert.ok((taker.remainingPp ?? 1) < (taker.costPp ?? 0), 'gap < cost, structurally');
+
+  // As a MAKER (fee-free series) a wide book with a big gap can clear.
+  const makerCfg = microConfigFromEnv({ KALSHI15M_B_COST_MODEL: 'MAKER' });
+  const maker = evaluateMicro({ cfg: makerCfg, ...base, micro: 0.545, imbalance: 0.5, ofi: 0.8, yesBid: 0.46, yesAsk: 0.54 });
+  assert.equal(maker.verdict, 'TRADE', maker.reasons.join(' | '));
+  assert.equal(maker.side, 'YES');
+  assert.equal(maker.costPp, 0, 'maker model assumes no crossing cost');
+  assert.ok((maker.netPp ?? 0) >= 2);
+});
+
+test('C panic fade: only fades drops that spot did NOT confirm', () => {
+  const cfg = panicConfigFromEnv({});
+  const base = { tauSec: 300, midNow: 0.44, midLag: 0.5, spotMoveBps: 0.2, yesBid: 0.43, yesAsk: 0.45 };
+  assert.equal(evaluatePanicFade({ cfg, ...base, tauSec: 5 }).skipReason, 'too_close_to_settlement');
+  assert.equal(evaluatePanicFade({ cfg, ...base, midLag: null }).skipReason, 'no_mid_history');
+  assert.equal(evaluatePanicFade({ cfg, ...base, spotMoveBps: null }).skipReason, 'no_spot_history');
+  assert.equal(evaluatePanicFade({ cfg, ...base, midLag: 0.46 }).skipReason, 'no_panic_drop');
+  assert.equal(evaluatePanicFade({ cfg, ...base, spotMoveBps: 5 }).skipReason, 'spot_confirms_move',
+    'a drop spot confirms is news, not panic');
+
+  const gated = evaluatePanicFade({ cfg, ...base }); // 6pp drop -> 3pp assumed rebound < costs
+  assert.equal(gated.skipReason, 'edge_below_cost');
+  assert.equal(gated.side, 'YES');
+  assert.ok(gated.reasons.some((r) => r.includes('ASSUMPTION')), 'the rebound fraction is declared');
+
+  const trade = evaluatePanicFade({ cfg, ...base, midLag: 0.64 }); // 20pp drop
+  assert.equal(trade.verdict, 'TRADE', trade.reasons.join(' | '));
+  assert.equal(trade.side, 'YES');
+  assert.ok((trade.remainingPp ?? 0) > 9, 'half of a 20pp unexplained drop');
+  assert.ok((trade.netPp ?? 0) >= 2);
+});
+
+test('D momentum: continuation is an assumption, already-repriced moves earn nothing', () => {
+  const cfg = momentumConfigFromEnv({});
+  const base = {
+    tauSec: 300, strike: 59_000, spotNow: 59_000, spotLag: 58_980,
+    venuesAgree: true, sigmaPerSec: 0.0004, repricedPp: 0, yesBid: 0.495, yesAsk: 0.505,
+  };
+  assert.equal(evaluateMomentum({ cfg, ...base, tauSec: 5 }).skipReason, 'too_close_to_settlement');
+  assert.equal(evaluateMomentum({ cfg, ...base, strike: null }).skipReason, 'no_model_inputs');
+  assert.equal(evaluateMomentum({ cfg, ...base, sigmaPerSec: null }).skipReason, 'no_model_inputs');
+  assert.equal(evaluateMomentum({ cfg, ...base, spotLag: null }).skipReason, 'no_spot_history');
+  assert.equal(evaluateMomentum({ cfg, ...base, spotNow: 58_980.5 }).skipReason, 'move_too_small');
+  assert.equal(evaluateMomentum({ cfg, ...base, venuesAgree: false }).skipReason, 'venue_disagreement');
+
+  const normal = evaluateMomentum({ cfg, ...base });
+  assert.equal(normal.skipReason, 'edge_below_cost', 'a 3.4bps hop does not pay for a round trip');
+  assert.ok(normal.reasons.some((r) => r.includes('ASSUMPTION')), 'continuation assumption declared');
+
+  const repriced = evaluateMomentum({ cfg, ...base, repricedPp: 10 });
+  assert.equal(repriced.skipReason, 'edge_below_cost');
+  assert.ok((repriced.remainingPp ?? 1) < 1, 'the book already did the move -> nothing left to chase');
+
+  const big = evaluateMomentum({ cfg, ...base, spotNow: 59_500, spotLag: 58_500, yesBid: 0.499, yesAsk: 0.501 });
+  assert.equal(big.verdict, 'TRADE', big.reasons.join(' | '));
+  assert.equal(big.side, 'YES');
+  assert.ok((big.netPp ?? 0) >= 2);
+});
+
+test('E late favorites: EV gate in both variants, rare-loss math on the record', () => {
+  const hold = lateFavConfigFromEnv({});
+  const exit = lateFavConfigFromEnv({ KALSHI15M_E_VARIANT: 'EXIT' });
+  const base = { tauSec: 120, pYes: 0.93, entryPrice: 0.9, yesBid: 0.895, yesAsk: 0.905 };
+  assert.equal(evaluateLateFav({ cfg: hold, ...base, tauSec: 300 }).skipReason, 'not_late_enough');
+  assert.equal(evaluateLateFav({ cfg: hold, ...base, entryPrice: 0.75 }).skipReason, 'not_a_favorite');
+  assert.equal(evaluateLateFav({ cfg: hold, ...base, entryPrice: 0.98 }).skipReason, 'price_ceiling');
+  assert.equal(evaluateLateFav({ cfg: hold, ...base, pYes: null }).skipReason, 'no_model_probability');
+  assert.equal(evaluateLateFav({ cfg: exit, ...base, tauSec: 10 }).skipReason, 'inside_exit_lead');
+
+  const h = evaluateLateFav({ cfg: hold, ...base });
+  assert.equal(h.skipReason, 'edge_below_cost');
+  assert.ok(h.reasons.some((r) => r.includes('erases ~10 wins')),
+    'at 90c one loss erases ~10 wins — the win rate is never the argument');
+
+  const h2 = evaluateLateFav({ cfg: hold, ...base, pYes: 0.95 });
+  assert.equal(h2.verdict, 'TRADE', h2.reasons.join(' | '));
+  assert.equal(h2.side, 'YES');
+
+  const e1 = evaluateLateFav({ cfg: exit, ...base });
+  assert.equal(e1.skipReason, 'edge_below_cost', 'the exit variant pays the full round trip');
+  const e2 = evaluateLateFav({ cfg: exit, ...base, pYes: 0.95, yesBid: 0.899, yesAsk: 0.901 });
+  assert.equal(e2.verdict, 'TRADE', e2.reasons.join(' | '));
+});
+
+test('F maker: fee-free quote, and the unmodelled parts are said out loud', () => {
+  const cfg = makerConfigFromEnv({});
+  const base = { tauSec: 300, pYes: 0.52, yesBid: 0.51, yesAsk: 0.53 };
+  assert.equal(evaluateMaker({ cfg, ...base, tauSec: 5 }).skipReason, 'too_close_to_settlement');
+  assert.equal(evaluateMaker({ cfg, ...base, pYes: null }).skipReason, 'no_model_probability');
+  assert.equal(evaluateMaker({ cfg, ...base, yesBid: 0.53, yesAsk: 0.51 }).skipReason, 'no_executable_book');
+
+  const weak = evaluateMaker({ cfg, ...base });
+  assert.equal(weak.skipReason, 'edge_below_cost');
+  assert.ok(weak.reasons.some((r) => r.includes('maker_fee=0')), 'the fee-free series is stated');
+  assert.ok(weak.reasons.some((r) => r.includes('queue_position=UNMODELLED')), 'queue not modelled');
+  assert.ok(weak.reasons.some((r) => r.includes('fill_probability=UNMODELLED')), 'fill not modelled');
+  assert.ok(weak.reasons.some((r) => r.includes('adverse_selection=UNMODELLED')), 'adverse selection not modelled');
+
+  const yes = evaluateMaker({ cfg, ...base, pYes: 0.6 });
+  assert.equal(yes.verdict, 'TRADE', yes.reasons.join(' | '));
+  assert.equal(yes.side, 'YES');
+  assert.equal(yes.costPp, 0, 'makers pay nothing on KXBTC15M');
+  assert.ok((yes.netPp ?? 0) >= 2);
+
+  const no = evaluateMaker({ cfg, ...base, pYes: 0.4 });
+  assert.equal(no.side, 'NO', 'when the model says NO is the cheap side, quote NO');
+  assert.equal(no.verdict, 'TRADE');
 });

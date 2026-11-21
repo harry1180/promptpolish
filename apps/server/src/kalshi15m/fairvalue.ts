@@ -196,6 +196,24 @@ export function impliedSigma(
   return std / Math.sqrt(units);
 }
 
+/**
+ * True when the BOOK's implied direction contradicts our own spot-vs-strike
+ * direction by a material margin (|z| >= 0.1). That is a data disagreement —
+ * our spot, the strike, or the book is wrong about one of them — and it must
+ * never be papered over with a vol fallback: the fair value is refused
+ * instead, so every strategy sees 'no_sigma' rather than a confident number
+ * built on inputs that disagree with each other.
+ */
+export function bookSpotDisagree(
+  pImplied: number | null, spot: number | null, strike: number | null,
+): boolean {
+  if (pImplied === null || spot === null || strike === null) return false;
+  if (!(pImplied > 0 && pImplied < 1) || !(spot > 0) || !(strike > 0)) return false;
+  const z = normInv(pImplied);
+  if (z === null || Math.abs(z) < 0.1) return false;
+  return Math.sign(z) !== Math.sign(Math.log(spot / strike));
+}
+
 /** Inverse standard normal CDF (bisection on normCdf: simple, monotone, exact enough). */
 export function normInv(p: number): number | null {
   if (!(p > 0) || !(p < 1)) return null;

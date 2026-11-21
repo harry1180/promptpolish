@@ -88,10 +88,21 @@ services:
       # dashboard uses; the key file is mounted read-only at /run/secrets).
       KALSHI15M_ENABLED: "1"
       CRYPTO_SPOT_TAPE: "1"
-      # STRATEGY A (cross-exchange lead/lag) — SHADOW ONLY: records every
-      # evaluation (taken or skipped, with its reason) to k15m_signals and
-      # never places an order; there is no execution path in the engine yet.
+      # STRATEGIES A..F — SHADOW ONLY: every evaluation (taken or skipped,
+      # with its reason) is written to k15m_signals. Nothing here can place an
+      # order: the engine has no execution path at all.
+      #   A cross-exchange lead/lag   B order-book microstructure
+      #   C panic fade                 D momentum scalping
+      #   E late-window favorites      F passive maker (fee-free series)
+      # Assumptions each one states in its reasons: C rebound fraction 0.5,
+      # D continuation 0.5, E/HOLD exit-free, F queue/fill/adverse-selection
+      # UNMODELLED. Promote to paper only on evidence from this log.
       KALSHI15M_STRAT_A: "1"
+      KALSHI15M_STRAT_B: "1"
+      KALSHI15M_STRAT_C: "1"
+      KALSHI15M_STRAT_D: "1"
+      KALSHI15M_STRAT_E: "1"
+      KALSHI15M_STRAT_F: "1"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"

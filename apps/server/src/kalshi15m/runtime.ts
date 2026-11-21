@@ -24,8 +24,14 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { KalshiBook, type BookMetrics, type TradePrint } from './book.ts';
-import { evaluateLeadLag, leadLagConfigFromEnv, type LeadLagConfig } from './strategies.ts';
-import { fairValue, impliedSigma, modelEdge } from './fairvalue.ts';
+import {
+  evaluateLeadLag, evaluateMaker, evaluateMomentum, evaluateMicro, evaluateLateFav,
+  evaluatePanicFade, lateFavConfigFromEnv, leadLagConfigFromEnv, makerConfigFromEnv,
+  microConfigFromEnv, momentumConfigFromEnv, panicConfigFromEnv,
+  type LateFavConfig, type LeadLagConfig, type MakerConfig, type MicroConfig,
+  type MomentumConfig, type PanicConfig, type StrategyVerdict,
+} from './strategies.ts';
+import { bookSpotDisagree, fairValue, impliedSigma, modelEdge } from './fairvalue.ts';
 import { KalshiRest, KalshiWs, KXBTC15M, loadCreds, type AuthConfig, type KalshiCreds, type StreamSocket } from './client.ts';
 import {
   eventOfMarket, msToClose, phaseAt, windowFromRest,
@@ -65,7 +71,13 @@ export interface K15mConfig {
   impliedWindowSamples: number;
   /** STRATEGY A (cross-exchange lead/lag) — shadow only, off by default */
   stratA: LeadLagConfig;
-  /** how often Strategy A is evaluated (ms) — 1s keeps the shadow log bounded */
+  /** B microstructure / C panic-fade / D momentum / E late favorites / F maker */
+  stratB: MicroConfig;
+  stratC: PanicConfig;
+  stratD: MomentumConfig;
+  stratE: LateFavConfig;
+  stratF: MakerConfig;
+  /** how often every shadow strategy is evaluated (ms) — 1s bounds the log */
   stratAEvalMs: number;
   auth: AuthConfig;
 }
@@ -96,6 +108,11 @@ export function k15mConfigFromEnv(env: Record<string, string | undefined> = proc
       : 'max',
     impliedWindowSamples: num(env.KALSHI15M_IMPLIED_WINDOW, 240),
     stratA: leadLagConfigFromEnv(env),
+    stratB: microConfigFromEnv(env),
+    stratC: panicConfigFromEnv(env),
+    stratD: momentumConfigFromEnv(env),
+    stratE: lateFavConfigFromEnv(env),
+    stratF: makerConfigFromEnv(env),
     stratAEvalMs: num(env.KALSHI15M_A_EVAL_MS, 1_000),
     auth: {
       apiKeyId: env.KALSHI_API_KEY_ID,
@@ -173,6 +190,8 @@ export class K15mRuntime {
   private readonly lagRing: Array<{ ts: number; spot: number | null; mid: number | null; agree: boolean | null }> = [];
   private lastStratAEvalAt = 0;
   readonly stratAStats = { evaluated: 0, traded: 0, skipped: 0, lastVerdict: null as string | null, lastNetPp: null as number | null };
+  /** per-strategy shadow counters (B..F; A keeps stratAStats for compatibility) */
+  readonly shadowByStrategy: Record<string, { evaluated: number; traded: number }> = {};
   private started = false;
 
   constructor(deps: K15mDeps) {
@@ -270,7 +289,7 @@ export class K15mRuntime {
         });
         book.endSampleWindow();
         this.stats.samples += 1;
-        if (this.config.stratA.enabled) this.runStrategyA(now, bounds, m, fair);
+        this.runShadowStrategies(now, bounds, m, fair);
       }
     }
 
@@ -508,7 +527,11 @@ export class K15mRuntime {
       while (this.impliedRing.length > this.config.impliedWindowSamples) this.impliedRing.shift();
     }
     const impliedMedian = this.impliedMedian();
-    const chosen = this.chooseSigma(ref.sigmaPerSec, impliedMedian);
+    // a material book-vs-spot direction disagreement refuses the model outright:
+    // no fair value is better than a confident number from disagreeing inputs
+    const chosen = bookSpotDisagree(impliedMid, ref.spot, strike)
+      ? { sigma: null, source: 'disagreement' }
+      : this.chooseSigma(ref.sigmaPerSec, impliedMedian);
 
     // Strategy A lookback history: what spot, the YES mid and the venue
     // agreement looked like at this instant (bounded ring)
@@ -615,71 +638,153 @@ export class K15mRuntime {
     };
   }
 
-  /**
-   * STRATEGY A (shadow): evaluate the cross-exchange lead/lag signal once per
-   * `stratAEvalMs` and record EVERY outcome with its reasons — taken and
-   * rejected alike, so the shadow log can be scored for false negatives too.
-   * There is no execution path from here: no order, no position, no broker.
-   */
-  private runStrategyA(
-    now: number, bounds: WindowBounds, m: BookMetrics, fair: SampleFair | null,
-  ): void {
-    const cfg = this.config.stratA;
-    if (!this.current) return;
-    if (now - this.lastStratAEvalAt < this.config.stratAEvalMs) return;
-    this.lastStratAEvalAt = now;
+  /* ---------------------------------------------------------------- */
+  /* Shadow strategies: A..F, one pass per eval window                 */
+  /* ---------------------------------------------------------------- */
 
-    // what spot / YES mid / venue agreement looked like `lagSec` ago
-    const target = now - cfg.lagSec * 1_000;
-    let past: { spot: number | null; mid: number | null } | null = null;
+  /** The lagRing entry at or before `targetTs` (null = not enough history). */
+  private lagAt(targetTs: number): { ts: number; spot: number | null; mid: number | null; agree: boolean | null } | null {
     for (let i = this.lagRing.length - 1; i >= 0; i--) {
-      if (this.lagRing[i].ts <= target) { past = this.lagRing[i]; break; }
+      if (this.lagRing[i].ts <= targetTs) return this.lagRing[i];
     }
-    const last = this.lagRing[this.lagRing.length - 1] ?? null;
-    const tauSec = msToClose(bounds, now) / 1_000;
-    const spotNow = last?.spot ?? fair?.spot ?? null;
-    const spotLag = past?.spot ?? null;
-    const midNow = last?.mid ?? fair?.impliedMid ?? null;
-    const midLag = past?.mid ?? null;
+    return null;
+  }
 
-    const verdict = evaluateLeadLag({
-      cfg, now, tauSec,
-      strike: this.current.strike,
-      spotNow, spotLag, midNow, midLag,
-      venuesAgree: last?.agree === true,
-      sigmaPerSec: fair?.sigma ?? null,
-      yesBid: m.bestBid, yesAsk: m.bestAsk,
-    });
-    const moveBps = spotNow !== null && spotLag !== null && spotLag > 0
-      ? Math.log(spotNow / spotLag) * 10_000
-      : null;
-
+  /** Persist one shadow verdict and bump the counters. No execution path. */
+  private recordSignal(
+    v: StrategyVerdict, now: number, bounds: WindowBounds,
+    ctx: { tauSec: number; strike: number | null; sigma: number | null;
+           spotNow: number | null; spotLag: number | null;
+           midNow: number | null; midLag: number | null; moveBps: number | null;
+           agree: boolean | null },
+  ): void {
+    if (!this.current) return;
     insertSignal(this.db, {
       ts: now,
       marketTicker: this.current.marketTicker,
       eventTicker: this.current.eventTicker,
-      strategy: verdict.strategy,
-      verdict: verdict.verdict,
-      side: verdict.side,
-      expectedMovePp: verdict.expectedMovePp,
-      repricedPp: verdict.repricedPp,
-      remainingPp: verdict.remainingPp,
-      costPp: verdict.costPp,
-      netPp: verdict.netPp,
-      tauSec,
-      strike: this.current.strike,
-      sigma: fair?.sigma ?? null,
-      spotNow, spotLag, midNow, midLag, moveBps,
-      agree: last?.agree ?? null,
-      skipReason: verdict.skipReason,
-      reasons: verdict.reasons.join(' | '),
+      strategy: v.strategy,
+      verdict: v.verdict,
+      side: v.side,
+      expectedMovePp: v.expectedMovePp,
+      repricedPp: v.repricedPp,
+      remainingPp: v.remainingPp,
+      costPp: v.costPp,
+      netPp: v.netPp,
+      tauSec: ctx.tauSec,
+      strike: ctx.strike,
+      sigma: ctx.sigma,
+      spotNow: ctx.spotNow,
+      spotLag: ctx.spotLag,
+      midNow: ctx.midNow,
+      midLag: ctx.midLag,
+      moveBps: ctx.moveBps,
+      agree: ctx.agree,
+      skipReason: v.skipReason,
+      reasons: v.reasons.join(' | '),
       phase: phaseAt(bounds, now),
     });
-    this.stratAStats.evaluated += 1;
-    this.stratAStats.lastVerdict = verdict.verdict;
-    this.stratAStats.lastNetPp = verdict.netPp;
-    if (verdict.verdict === 'TRADE') this.stratAStats.traded += 1;
-    else this.stratAStats.skipped += 1;
+    if (v.strategy === 'A_LEADLAG') {
+      this.stratAStats.evaluated += 1;
+      this.stratAStats.lastVerdict = v.verdict;
+      this.stratAStats.lastNetPp = v.netPp;
+      if (v.verdict === 'TRADE') this.stratAStats.traded += 1;
+      else this.stratAStats.skipped += 1;
+    }
+    const bucket = this.shadowByStrategy[v.strategy] ?? { evaluated: 0, traded: 0 };
+    bucket.evaluated += 1;
+    if (v.verdict === 'TRADE') bucket.traded += 1;
+    this.shadowByStrategy[v.strategy] = bucket;
+  }
+
+  /**
+   * Evaluate every ENABLED shadow strategy once per `stratAEvalMs` and record
+   * EVERY outcome with its reasons — taken and rejected alike, so the shadow
+   * log can be scored for false negatives too. There is no execution path
+   * from here: no order, no position, no broker.
+   */
+  private runShadowStrategies(
+    now: number, bounds: WindowBounds, m: BookMetrics, fair: SampleFair | null,
+  ): void {
+    const c = this.config;
+    const anyOn = c.stratA.enabled || c.stratB.enabled || c.stratC.enabled
+      || c.stratD.enabled || c.stratE.enabled || c.stratF.enabled;
+    if (!anyOn || !this.current) return;
+    if (now - this.lastStratAEvalAt < c.stratAEvalMs) return;
+    this.lastStratAEvalAt = now;
+
+    const tauSec = msToClose(bounds, now) / 1_000;
+    const strike = this.current.strike;
+    const mid = fair?.impliedMid ?? null;
+    const pYes = fair?.pYes ?? null;
+    const sigma = fair?.sigma ?? null;
+    const yesBid = m.bestBid;
+    const yesAsk = m.bestAsk;
+    const spotNow = this.lagRing[this.lagRing.length - 1]?.spot ?? fair?.spot ?? null;
+    const agree = this.lagRing[this.lagRing.length - 1]?.agree ?? null;
+    const micro = mid !== null && yesBid !== null && yesAsk !== null
+      && m.bestBidSize + m.bestAskSize > 0
+      ? (m.bestBidSize * yesAsk + m.bestAskSize * yesBid) / (m.bestBidSize + m.bestAskSize)
+      : null;
+    const base = { tauSec, strike, sigma, spotNow, spotLag: null, midNow: mid, midLag: null, moveBps: null, agree };
+
+    if (c.stratA.enabled) {
+      const lag = this.lagAt(now - c.stratA.lagSec * 1_000);
+      const last = this.lagRing[this.lagRing.length - 1] ?? null;
+      const spotLag = lag?.spot ?? null;
+      const midLag = lag?.mid ?? null;
+      const moveBps = spotNow !== null && spotLag !== null && spotLag > 0
+        ? Math.log(spotNow / spotLag) * 10_000 : null;
+      this.recordSignal(evaluateLeadLag({
+        cfg: c.stratA, now, tauSec, strike,
+        spotNow, spotLag, midNow: mid, midLag,
+        venuesAgree: last?.agree === true,
+        sigmaPerSec: sigma, yesBid, yesAsk,
+      }), now, bounds, { ...base, spotLag, midLag, moveBps, agree: last?.agree ?? null });
+    }
+
+    if (c.stratB.enabled) {
+      this.recordSignal(evaluateMicro({
+        cfg: c.stratB, tauSec, mid, micro,
+        imbalance: m.imbalance, ofi: m.ofi, takerBias60s: m.takerBias60s,
+        yesBid, yesAsk,
+      }), now, bounds, base);
+    }
+
+    if (c.stratC.enabled) {
+      const lag = this.lagAt(now - c.stratC.lookbackSec * 1_000);
+      const spotLag = lag?.spot ?? null;
+      const midLag = lag?.mid ?? null;
+      const moveBps = spotNow !== null && spotLag !== null && spotLag > 0
+        ? Math.log(spotNow / spotLag) * 10_000 : null;
+      this.recordSignal(evaluatePanicFade({
+        cfg: c.stratC, tauSec, midNow: mid, midLag, spotMoveBps: moveBps, yesBid, yesAsk,
+      }), now, bounds, { ...base, spotLag, midLag, moveBps });
+    }
+
+    if (c.stratD.enabled) {
+      const lag = this.lagAt(now - c.stratD.lookbackSec * 1_000);
+      const spotLag = lag?.spot ?? null;
+      const midLag = lag?.mid ?? null;
+      const repricedPp = mid !== null && midLag !== null ? (mid - midLag) * 100 : null;
+      const moveBps = spotNow !== null && spotLag !== null && spotLag > 0
+        ? Math.log(spotNow / spotLag) * 10_000 : null;
+      this.recordSignal(evaluateMomentum({
+        cfg: c.stratD, tauSec, strike, spotNow, spotLag,
+        venuesAgree: lag?.agree === true, sigmaPerSec: sigma,
+        repricedPp, yesBid, yesAsk,
+      }), now, bounds, { ...base, spotLag, midLag, moveBps, agree: lag?.agree ?? null });
+    }
+
+    if (c.stratE.enabled) {
+      this.recordSignal(evaluateLateFav({
+        cfg: c.stratE, tauSec, pYes, entryPrice: yesAsk, yesBid, yesAsk,
+      }), now, bounds, base);
+    }
+
+    if (c.stratF.enabled) {
+      this.recordSignal(evaluateMaker({ cfg: c.stratF, tauSec, pYes, yesBid, yesAsk }), now, bounds, base);
+    }
   }
 
   private writeHealth(now: number, phase: WindowPhase, book: KalshiBook | undefined): void {
@@ -758,7 +863,7 @@ export class K15mRuntime {
         sampleMs: this.config.sampleMs, discoverMs: this.config.discoverMs,
         healthMs: this.config.healthMs, staleMs: this.config.staleMs,
       },
-      /** STRATEGY A: shadow only — no order is ever placed from this engine */
+      /** every strategy: SHADOW ONLY — no order is ever placed from this engine */
       strategyA: {
         enabled: this.config.stratA.enabled,
         mode: 'SHADOW',
@@ -766,6 +871,15 @@ export class K15mRuntime {
         evalMs: this.config.stratAEvalMs,
         lagRing: this.lagRing.length,
         ...this.stratAStats,
+      },
+      shadowStrategies: {
+        mode: 'SHADOW',
+        enabled: {
+          A: this.config.stratA.enabled, B: this.config.stratB.enabled,
+          C: this.config.stratC.enabled, D: this.config.stratD.enabled,
+          E: this.config.stratE.enabled, F: this.config.stratF.enabled,
+        },
+        byStrategy: this.shadowByStrategy,
       },
       /** sigma policy in force — an edge is only meaningful with this in view */
       sigmaPolicy: {

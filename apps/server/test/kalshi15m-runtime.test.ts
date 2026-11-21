@@ -265,39 +265,65 @@ test('rollover: a new window replaces the current one and is persisted', async (
   db.close();
 });
 
-test('module 3: fair value + model edge recorded with every sample', async () => {
+test('module 3: fair value refuses inputs that contradict each other', async () => {
   const { rt, sock, now, db } = makeRuntime({
-    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0002, sigmaWindowSec: 60, approx: 'coinbase' }),
+    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0001, sigmaWindowSec: 60, approx: 'coinbase', agree1s: true }),
   });
   await rt.discover();
   rt.ws.start();
   sock.fire('open');
+  // captured book prices YES at 0.435 while spot sits ABOVE the strike:
+  // the book says "more likely down than up" and our spot says the opposite.
   sock.fire('message', JSON.stringify(frame('orderbook_snapshot')));
   now.t += 300;
   rt.tick(now.t);
 
   const row = db.prepare('SELECT * FROM k15m_book_samples ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
-  assert.equal(row.fair_spot, 59_000, 'the spot the model used is recorded');
-  assert.equal(row.fair_sigma, 0.0002, 'so is the sigma');
-  assert.ok(typeof row.fair_yes === 'number' && (row.fair_yes as number) > 0.5,
-    `spot 59000 vs strike 58643.54 -> YES more likely than not (${row.fair_yes})`);
-  assert.ok(Math.abs((row.implied_mid as number) - 0.435) < 1e-9,
-    'implied mid from the real book: (0.43+0.44)/2 — comparison only, never a fill');
-  assert.ok(typeof row.edge_pp === 'number' && (row.edge_pp as number) > 0,
-    'model above book -> positive edge_pp');
-  assert.ok(Math.abs((row.edge_pp as number) - (((row.fair_yes as number) - 0.435) * 100)) < 1e-6,
-    'edge_pp is exactly (p_yes - implied_mid) * 100');
-  assert.equal(row.fair_reason, null, 'inputs were complete, so no reason is recorded');
-  assert.equal(row.fair_sigma_window, 60, 'the sigma window used is on the record');
-  assert.equal(row.sigma_implied, null,
-    'book mid 0.435 prices DOWN while spot is above strike -> sign mismatch, no fake vol number');
+  assert.equal(row.fair_spot, 59_000, 'the spot we tried to use is on the record');
+  assert.equal(row.sigma_realized, 0.0001, 'so is the tape sigma');
+  assert.equal(row.fair_sigma_source, 'disagreement', 'no vol fallback when book and spot disagree');
+  assert.equal(row.fair_yes, null, 'a confident number from disagreeing inputs is not produced');
+  assert.equal(row.edge_pp, null, 'no model -> no claimed edge');
+  assert.equal(row.fair_reason, 'no_sigma', 'the refusal carries its reason');
+  assert.ok(typeof row.implied_mid === 'number', 'the book still reports its own mid');
+  assert.equal(row.sigma_implied, null, 'the inversion is meaningless under a sign mismatch');
 
-  // the live status block carries the same numbers
   const st = rt.status(now.t) as { fairValue: Record<string, unknown> | null };
-  assert.ok(st.fairValue, 'status reports the fair value');
-  assert.equal(st.fairValue?.approx, 'coinbase', 'the approximating venue is always named');
   assert.equal(st.fairValue?.reference, 'APPROXIMATION');
-  assert.equal(st.fairValue?.pYes, row.fair_yes);
+  assert.equal(st.fairValue?.sigmaSource, 'disagreement');
+  rt.stop();
+  db.close();
+});
+
+test('module 3b: a consistent book records spot, sigma, probability and edge', async () => {
+  const { rt, sock, now, db } = makeRuntime({
+    spotRef: () => ({ spot: 59_000, sigmaPerSec: 0.0001, sigmaWindowSec: 60, approx: 'coinbase', agree1s: true }),
+  });
+  await rt.discover();
+  rt.ws.start();
+  sock.fire('open');
+  // mid 0.605: above the coin flip, same direction as spot-above-strike
+  sock.fire('message', JSON.stringify({
+    type: 'orderbook_snapshot', sid: 4, seq: 1,
+    msg: { market_ticker: 'KXBTC15M-26NOV201600-00', yes_dollars_fp: [['0.6000', '100']], no_dollars_fp: [['0.3900', '100']] },
+  }));
+  now.t += 300;
+  rt.tick(now.t);
+
+  const row = db.prepare('SELECT * FROM k15m_book_samples ORDER BY id DESC LIMIT 1').get() as Record<string, unknown>;
+  assert.equal(row.fair_spot, 59_000);
+  assert.equal(row.sigma_realized, 0.0001, 'tape sigma recorded');
+  assert.equal(row.fair_sigma_source, 'max/implied', 'the market binds when it implies more vol');
+  assert.ok((row.fair_sigma as number) >= (row.sigma_implied as number) * 0.999,
+    'priced with the binding (implied) sigma');
+  assert.ok((row.sigma_implied as number) > 0.0001, 'book implies far more vol than the tape');
+  assert.ok(typeof row.fair_yes === 'number' && (row.fair_yes as number) > 0.5,
+    `p tracks the book: ${row.fair_yes}`);
+  assert.ok(Math.abs((row.implied_mid as number) - 0.605) < 1e-9, 'implied mid from the real book');
+  assert.ok(Math.abs(row.edge_pp as number) < 1, `priced at the market vol the edge is ~0: ${row.edge_pp}`);
+  assert.equal(row.fair_sigma_window, 60);
+  assert.equal(row.fair_reason, null);
+  assert.equal(row.fair_approx, 'coinbase');
   rt.stop();
   db.close();
 });
@@ -389,7 +415,7 @@ test('module 3.2: pricing with max(realized, implied) kills the fake edge', asyn
 });
 
 test('module 4: Strategy A shadow logs every evaluation, taken and skipped', async () => {
-  let spot = 58_000; // the tape's spot moves between the two evaluations
+  let spot = 58_700; // the tape's spot moves between the two evaluations
   const { rt, sock, now, db } = makeRuntime({
     spotRef: () => ({
       spot, sigmaPerSec: 0.0001, sigmaWindowSec: 60, approx: 'coinbase', agree1s: true,
@@ -402,11 +428,15 @@ test('module 4: Strategy A shadow logs every evaluation, taken and skipped', asy
   await rt.discover();
   rt.ws.start();
   sock.fire('open');
-  sock.fire('message', JSON.stringify(frame('orderbook_snapshot')));
+  // a book consistent with spot > strike (mid 0.605): no input disagreement
+  sock.fire('message', JSON.stringify({
+    type: 'orderbook_snapshot', sid: 4, seq: 1,
+    msg: { market_ticker: 'KXBTC15M-26NOV201600-00', yes_dollars_fp: [['0.6000', '100']], no_dollars_fp: [['0.3900', '100']] },
+  }));
 
   now.t += 300;
   rt.tick(now.t); // first evaluation: no lag history yet -> honest skip
-  spot = 59_000;  // +172 bps before the next evaluation
+  spot = 59_000;  // +51 bps before the next evaluation
   now.t += 3_300;
   rt.tick(now.t); // second evaluation: 3.3s of history, big unrepriced move
 
@@ -421,7 +451,8 @@ test('module 4: Strategy A shadow logs every evaluation, taken and skipped', asy
   assert.ok((rows[1].net_pp as number) >= 2, `net ${rows[1].net_pp} clears the 2c target`);
   assert.equal(rows[1].strategy, 'A_LEADLAG');
   assert.equal(rows[1].agree, 1);
-  assert.ok((rows[1].move_bps as number) > 100, `move recorded: ${rows[1].move_bps}`);
+  assert.ok((rows[1].move_bps as number) > 30, `move recorded: ${rows[1].move_bps}`);
+  assert.ok((rows[1].net_pp as number) < (rows[1].remaining_pp as number), 'costs are actually subtracted');
   assert.ok(String(rows[1].reasons).includes('side=YES'));
 
   const st = rt.status(now.t) as { strategyA: Record<string, unknown> };
