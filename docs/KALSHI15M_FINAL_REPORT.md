@@ -139,6 +139,27 @@ Full workspace gate: **633 tests, 0 failures**. Typecheck clean. Commits `97a729
 6. One flaky unrelated test (`xchange.test.ts` ECONNRESET under parallel runs).
 7. BRTI not licensed: settlement inputs are approximations by construction.
 
+## 5b. Update 2026-11-21 — maker execution fix (after live debugging)
+
+Measured on the live paper ledger: **F_MAKER run as a taker lost on 100 % of its
+structure** — 132 trades, 29.5 % win, −2,013.9 ¢, average fees **15.58 ¢** against an
+average price move of **−0.46 pp** (the strategy's edge is ~2 ¢ and fee-free *by design*).
+Worst bucket: STOP_LOSS 0/50 wins, −2,130.6 ¢ (a 5 ¢ stop under an ASK entry pays
+spread + two taker fees + slippage before the stop triggers). TAKE_PROFIT was the only
+positive exit (10/10, +453.9 ¢). Separately, the 2 % daily loss cap had tripped at
+−20.01 ¢ and blocked 64 consecutive entries — correct risk behaviour, but it froze the
+sample (raised to 10 % **for paper only**, disclosed in compose; live stays 2 %).
+
+Fix (commit `6c7bb18`): maker strategies now place **passive bids** — fill only when the
+market actually trades through (fresh print or opposite touch), fee-free, sized at fill,
+cancelled after 10 s if untouched; take-profit rests 2 ¢ above the entry and fills
+fee-free; stops/time exits still cross and still pay the taker fee. First 12-minute
+cohort after the fix: **15 closed, 14 wins = 93.3 %, net +172.16 ¢, fees 17.84 ¢**
+(14 TAKE_PROFIT, 1 STOP_LOSS −23.16 ¢), ≈75 trades/hour. **n = 15 over twelve minutes —
+a smoke signal, not a result.** Breakeven win rate at 2 ¢ TP / ~7.7 ¢ stop is ≈79 %,
+so 93 % is above water *here*, but the sample must run for days before any claim; the
+6-hourly backtest snapshot (`9d580ff28bae`) records the trajectory.
+
 ## 6. Future work (ordered)
 
 1. **Accumulate days of tape** — the binding constraint on every conclusion above.

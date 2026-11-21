@@ -109,6 +109,15 @@ services:
       # 10s time exit / 5c stop / 10c take, 5s re-entry cooldown.
       KALSHI15M_PAPER: "1"
       KALSHI15M_PAPER_BANKROLL: "100000"
+      # PAPER-ONLY daily loss cap. The research default (2%) tripped on
+      # 2026-11-21 at -20.01c and blocked 64 entries in a row — correct risk
+      # behaviour, but a paper engine that stops for 20h collects no data.
+      # Raised so the SIMULATED ledger keeps producing a measurable sample;
+      # the live recommendation stays 2% and this change is disclosed.
+      KALSHI15M_PAPER_DAILY_LOSS_PCT: "10"
+      # maker execution for F: passive bids, fee-free fills, 2c resting TP
+      KALSHI15M_PAPER_MAKER_STRATS: "F_MAKER"
+      KALSHI15M_PAPER_MAKER_TP_PP: "2"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"
