@@ -108,7 +108,26 @@ CREATE TABLE IF NOT EXISTS k15m_feed_health (
   stale INTEGER NOT NULL DEFAULT 0,
   book_trusted INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX IF NOT EXISTS idx_k15m_health_ts ON k15m_feed_health(ts);`;
+CREATE INDEX IF NOT EXISTS idx_k15m_health_ts ON k15m_feed_health(ts);
+
+-- Strategy A shadow log: EVERY evaluation, taken or skipped, with its reason.
+-- Shadows never trade; this table is the evidence base for promotion.
+CREATE TABLE IF NOT EXISTS k15m_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  market_ticker TEXT NOT NULL,
+  event_ticker TEXT,
+  strategy TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  side TEXT,
+  expected_move_pp REAL, repriced_pp REAL, remaining_pp REAL,
+  cost_pp REAL, net_pp REAL,
+  tau_sec REAL, strike REAL, sigma REAL,
+  spot_now REAL, spot_lag REAL, mid_now REAL, mid_lag REAL, move_bps REAL,
+  agree INTEGER, skip_reason TEXT, reasons TEXT, phase TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_k15m_signals_ts ON k15m_signals(ts);
+CREATE INDEX IF NOT EXISTS idx_k15m_signals_verdict ON k15m_signals(verdict, ts);`;
 
 /** Columns added after the table first shipped (existing DBs get them too). */
 const K15M_SAMPLE_MIGRATION: Array<[string, string]> = [
@@ -333,6 +352,92 @@ export function recentSamples(db: DatabaseSync, marketTicker: string, limit = 50
 
 export function windowRows(db: DatabaseSync, limit = 20): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM k15m_windows ORDER BY close_ts DESC LIMIT ?').all(limit) as unknown as Array<Record<string, unknown>>;
+}
+
+export interface SignalRow {
+  ts: number;
+  marketTicker: string;
+  eventTicker: string | null;
+  strategy: string;
+  verdict: 'TRADE' | 'SKIP';
+  side: string | null;
+  expectedMovePp: number | null;
+  repricedPp: number | null;
+  remainingPp: number | null;
+  costPp: number | null;
+  netPp: number | null;
+  tauSec: number | null;
+  strike: number | null;
+  sigma: number | null;
+  spotNow: number | null;
+  spotLag: number | null;
+  midNow: number | null;
+  midLag: number | null;
+  moveBps: number | null;
+  agree: boolean | null;
+  skipReason: string | null;
+  reasons: string;
+  phase: string | null;
+}
+
+/** One shadow evaluation. Returns the new row id (0 on constraint failure). */
+export function insertSignal(db: DatabaseSync, s: SignalRow): number {
+  const res = db.prepare(
+    `INSERT INTO k15m_signals (ts, market_ticker, event_ticker, strategy, verdict, side,
+       expected_move_pp, repriced_pp, remaining_pp, cost_pp, net_pp,
+       tau_sec, strike, sigma, spot_now, spot_lag, mid_now, mid_lag, move_bps,
+       agree, skip_reason, reasons, phase)
+     VALUES (${Array(23).fill('?').join(',')})`,
+  ).run(
+    s.ts, s.marketTicker, s.eventTicker, s.strategy, s.verdict, s.side,
+    s.expectedMovePp, s.repricedPp, s.remainingPp, s.costPp, s.netPp,
+    s.tauSec, s.strike, s.sigma, s.spotNow, s.spotLag, s.midNow, s.midLag, s.moveBps,
+    s.agree === null ? null : (s.agree ? 1 : 0), s.skipReason, s.reasons, s.phase,
+  );
+  return Number(res.lastInsertRowid);
+}
+
+export function recentSignals(db: DatabaseSync, limit = 200, strategy?: string): Array<Record<string, unknown>> {
+  const capped = Math.max(1, Math.min(5_000, limit));
+  if (strategy) {
+    return db.prepare('SELECT * FROM k15m_signals WHERE strategy = ? ORDER BY id DESC LIMIT ?')
+      .all(strategy, capped) as unknown as Array<Record<string, unknown>>;
+  }
+  return db.prepare('SELECT * FROM k15m_signals ORDER BY id DESC LIMIT ?')
+    .all(capped) as unknown as Array<Record<string, unknown>>;
+}
+
+/** Verdict mix + net stats for the dashboard (bounded read). */
+export function signalSummary(db: DatabaseSync, limit = 2_000): Record<string, unknown> {
+  const rows = db.prepare(
+    `SELECT verdict, side, net_pp, cost_pp, skip_reason FROM k15m_signals
+      ORDER BY id DESC LIMIT ?`,
+  ).all(Math.max(1, Math.min(20_000, limit))) as unknown as Array<Record<string, unknown>>;
+  const bySkip: Record<string, number> = {};
+  const bySide: Record<string, number> = {};
+  const nets: number[] = [];
+  let trades = 0;
+  for (const r of rows) {
+    if (r.verdict === 'TRADE') {
+      trades += 1;
+      const side = String(r.side ?? '?');
+      bySide[side] = (bySide[side] ?? 0) + 1;
+      if (typeof r.net_pp === 'number') nets.push(r.net_pp);
+    } else {
+      const reason = String(r.skip_reason ?? 'unknown');
+      bySkip[reason] = (bySkip[reason] ?? 0) + 1;
+    }
+  }
+  nets.sort((a, b) => a - b);
+  return {
+    window: { rows: rows.length, limit },
+    trades,
+    skips: rows.length - trades,
+    bySide,
+    bySkipReason: bySkip,
+    tradeNetPpMedian: nets.length ? nets[nets.length >> 1] : null,
+    note: 'SHADOW ONLY: no order was ever placed; verdicts are hypothetical.',
+  };
 }
 
 /** Age-based retention — keeps the file bounded without touching other tables. */

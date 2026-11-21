@@ -17,7 +17,7 @@ import { experimentSummary } from '../tradingusa/experiments.ts';
 import { evaluateFixedHorizons } from './accuracy.ts';
 import { handleXchange } from '../xchange/routes.ts';
 import { CRYPTO_SESSION, type CryptoConfig } from './config.ts';
-import { k15mCounts, recentSamples, windowRows } from '../kalshi15m/store.ts';
+import { k15mCounts, recentSamples, recentSignals, signalSummary, windowRows } from '../kalshi15m/store.ts';
 import type { K15mRuntime } from '../kalshi15m/runtime.ts';
 import type { SpotRuntime } from '../kalshi15m/spot.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, loadBars, openPositions, type PositionRow } from './broker.ts';
@@ -452,6 +452,21 @@ export async function handleCrypto(
         if (!market) return done({ status: 200, body: { count: 0, samples: [] } });
         const rows = recentSamples(db, market, int(url.searchParams.get('limit'), 300));
         return done({ status: 200, body: { count: rows.length, market, samples: rows } });
+      }
+      if (rest[1] === 'signals') {
+        if (!k) return done({ status: 200, body: { enabled: false, signals: [] } });
+        const strategy = url.searchParams.get('strategy');
+        const rows = recentSignals(db, int(url.searchParams.get('limit'), 200), strategy ?? undefined);
+        return done({
+          status: 200,
+          body: {
+            count: rows.length,
+            mode: 'SHADOW — no order is ever placed from this engine',
+            strategyAEnabled: ((k.status(now) as { strategyA?: { enabled?: boolean } }).strategyA?.enabled) ?? false,
+            summary: signalSummary(db, int(url.searchParams.get('summary_limit'), 2_000)),
+            signals: rows,
+          },
+        });
       }
       if (rest[1] === 'calibration') {
         if (!k) {

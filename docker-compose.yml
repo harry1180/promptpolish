@@ -88,6 +88,10 @@ services:
       # dashboard uses; the key file is mounted read-only at /run/secrets).
       KALSHI15M_ENABLED: "1"
       CRYPTO_SPOT_TAPE: "1"
+      # STRATEGY A (cross-exchange lead/lag) — SHADOW ONLY: records every
+      # evaluation (taken or skipped, with its reason) to k15m_signals and
+      # never places an order; there is no execution path in the engine yet.
+      KALSHI15M_STRAT_A: "1"
       # Kraken tier-1 taker fee. Backtest (scripts/crypto-backtest.mts, 602d):
       # 0.25% default -> net -$2.6k; real 0.16% -> +$141 on identical rules.
       CRYPTO_FEE_PCT: "0.0016"

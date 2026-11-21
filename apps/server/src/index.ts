@@ -206,7 +206,7 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
         s !== null && s.last !== null && s.stalenessMs !== null && s.stalenessMs < 5_000;
       const pick = ok(snap.coinbase) ? snap.coinbase : ok(snap.kraken) ? snap.kraken : null;
       if (!pick || !pick.last) {
-        return { spot: null, sigmaPerSec: null, sigmaWindowSec: null, approx: null };
+        return { spot: null, sigmaPerSec: null, sigmaWindowSec: null, approx: null, agree1s: snap.agree1s };
       }
       // Sigma window must never outlive the part of the contract that has
       // ALREADY elapsed (elapsed = 900s - time left, floored at 60s), and we
@@ -218,11 +218,17 @@ export function createApp(db: DatabaseSync, opts: AppOptions = {}): ReturnType<t
       ];
       for (const [windowSec, sigma] of ladder) {
         if (windowSec <= elapsed && sigma !== null) {
-          return { spot: pick.last.mid, sigmaPerSec: sigma, sigmaWindowSec: windowSec, approx: pick.venue };
+          return {
+            spot: pick.last.mid, sigmaPerSec: sigma, sigmaWindowSec: windowSec,
+            approx: pick.venue, agree1s: snap.agree1s,
+          };
         }
       }
       // fresh process: no vol history yet -> no sigma, hence no fair value
-      return { spot: pick.last.mid, sigmaPerSec: null, sigmaWindowSec: null, approx: pick.venue };
+      return {
+        spot: pick.last.mid, sigmaPerSec: null, sigmaWindowSec: null,
+        approx: pick.venue, agree1s: snap.agree1s,
+      };
     },
   });
   k15m.start();

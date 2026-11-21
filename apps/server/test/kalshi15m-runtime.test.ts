@@ -14,6 +14,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync } from 'node:crypto';
 import { K15mRuntime, chooseSigma, k15mConfigFromEnv, type K15mConfig } from '../src/kalshi15m/runtime.ts';
 import { KalshiRest, type StreamSocket } from '../src/kalshi15m/client.ts';
+import { leadLagConfigFromEnv } from '../src/kalshi15m/strategies.ts';
 
 const FIX = new URL('./fixtures/kalshi15m/', import.meta.url);
 function frame(kind: string, i = 0): Record<string, any> {
@@ -383,6 +384,52 @@ test('module 3.2: pricing with max(realized, implied) kills the fake edge', asyn
   assert.ok((cal.sigma.impliedOverRealizedMedian ?? 0) > 4, 'the ratio that exposes a vol gap');
   assert.ok(Math.abs(cal.edge.medianPp ?? 99) < 1, 'median edge ~0 once priced at the market vol');
   assert.ok((cal.edge.shareOver2Pp ?? 1) < 0.5, 'few samples exceed 2pp');
+  rt.stop();
+  db.close();
+});
+
+test('module 4: Strategy A shadow logs every evaluation, taken and skipped', async () => {
+  let spot = 58_000; // the tape's spot moves between the two evaluations
+  const { rt, sock, now, db } = makeRuntime({
+    spotRef: () => ({
+      spot, sigmaPerSec: 0.0001, sigmaWindowSec: 60, approx: 'coinbase', agree1s: true,
+    }),
+    configPatch: {
+      stratA: leadLagConfigFromEnv({ KALSHI15M_STRAT_A: '1' }),
+      stratAEvalMs: 1_000,
+    },
+  });
+  await rt.discover();
+  rt.ws.start();
+  sock.fire('open');
+  sock.fire('message', JSON.stringify(frame('orderbook_snapshot')));
+
+  now.t += 300;
+  rt.tick(now.t); // first evaluation: no lag history yet -> honest skip
+  spot = 59_000;  // +172 bps before the next evaluation
+  now.t += 3_300;
+  rt.tick(now.t); // second evaluation: 3.3s of history, big unrepriced move
+
+  const rows = db.prepare('SELECT * FROM k15m_signals ORDER BY id').all() as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2, 'one row per evaluation, never one per window');
+  assert.equal(rows[0].verdict, 'SKIP');
+  assert.equal(rows[0].skip_reason, 'no_spot_history', 'no history -> no signal, not a guess');
+  assert.ok(String(rows[0].reasons).length > 0);
+
+  assert.equal(rows[1].verdict, 'TRADE', 'the big unrepriced move is taken (shadow)');
+  assert.equal(rows[1].side, 'YES');
+  assert.ok((rows[1].net_pp as number) >= 2, `net ${rows[1].net_pp} clears the 2c target`);
+  assert.equal(rows[1].strategy, 'A_LEADLAG');
+  assert.equal(rows[1].agree, 1);
+  assert.ok((rows[1].move_bps as number) > 100, `move recorded: ${rows[1].move_bps}`);
+  assert.ok(String(rows[1].reasons).includes('side=YES'));
+
+  const st = rt.status(now.t) as { strategyA: Record<string, unknown> };
+  assert.equal(st.strategyA.enabled, true);
+  assert.equal(st.strategyA.mode, 'SHADOW');
+  assert.equal(st.strategyA.evaluated, 2);
+  assert.equal(st.strategyA.traded, 1);
+  assert.equal(st.strategyA.skipped, 1);
   rt.stop();
   db.close();
 });
