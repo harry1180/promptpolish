@@ -83,6 +83,55 @@ export interface XchangeConfig {
   contextPollMs: number;
 }
 
+/**
+ * Entry-side gates (paper only, all env-gated, all auditable).
+ *
+ * `threshold` is the walk-forward entry threshold: a cut on a feature of the
+ * RECORDED signal history (never a hand-picked number) — see calibrate.ts.
+ * `confirm` is the pre-entry confirmation gate: a pullback check against the
+ * Kraken tape plus a Kraken-vs-Coinbase direction check read from the samples
+ * the multi-exchange observer already writes. Both run before an order is
+ * created; the signal row is still written, so the history keeps growing.
+ */
+export interface EntryThresholdConfig {
+  /** CRYPTO_ENTRY_THRESHOLD — 1 (default) evaluates the cut, 0 disables it */
+  enabled: boolean;
+  /** CRYPTO_ENTRY_THRESHOLD_PCT — percentile of the recorded feature used as the cut */
+  percentile: number;
+  /** CRYPTO_ENTRY_THRESHOLD_MIN — evidence floor: fewer rows -> INSUFFICIENT_DATA */
+  minSamples: number;
+  /** forward window (daily sessions) used to score a recorded signal */
+  forwardDays: number;
+}
+
+export interface EntryConfirmConfig {
+  /** CRYPTO_ENTRY_CONFIRM — 1 (default) runs the gate, 0 skips every check */
+  enabled: boolean;
+  /** tape window the pullback is measured over (ms) */
+  windowMs: number;
+  /** fewer tape ticks than this -> NO_DATA (the leg passes, and says so) */
+  minTicks: number;
+  /** pullback required, as a multiple of daily ATR14 (volatility-scaled) */
+  atrMultiple: number;
+  /** floor / ceiling for the required pullback, as a fraction of price */
+  minPct: number;
+  maxPct: number;
+  /** multi-venue window read from xchange_samples (ms) */
+  venueWindowMs: number;
+  /** both legs are dropped to NO_DATA past this age (ms) — never a silent pass */
+  maxAgeMs: number;
+  /** require the two venues to agree AND not both be falling (long-only book) */
+  venueRequireUp: boolean;
+}
+
+export interface TrailConfig {
+  enabled: boolean;
+  /** ratchet starts once price is this many R above entry (R = initial stop distance) */
+  activateR: number;
+  /** distance kept behind the peak, in R */
+  distanceR: number;
+}
+
 export interface CryptoConfig {
   executionMode: 'PAPER_ONLY';
   /** single spot book — long-only, no leverage, no shorting */
@@ -90,6 +139,36 @@ export interface CryptoConfig {
   startCapital: number;
   riskPerTradePct: number;
   maxPositionPct: number;
+  /**
+   * HARD per-trade dollar risk cap (quote currency), independent of the
+   * percentage caps: shares are trimmed so `shares * stopDistance` can never
+   * exceed this. Default 250 — measured risk-at-stop on the 14 closed trades
+   * was 103-751 (avg ~400) with positions up to ~$10k, so the cap binds
+   * below what the book actually took. `CRYPTO_MAX_RISK_USD`.
+   */
+  maxRiskUsd: number;
+  /**
+   * Stop geometry for NEW entries. `sigmah` keeps APPROVED GEOMETRY C exactly
+   * as shipped (stop = 1.0 * sigma_H). `atr` (default) replaces ONLY the stop
+   * with a volatility-scaled one: `price * (1 - clamp(atrMultiple * ATR14/price,
+   * minPct, maxPct))` — measured daily ATR14 on the entries taken was 4.9-12.4%
+   * while geometry C's stop sat 1.0-26.8% below entry (sigma_H = ATR/price *
+   * sqrt(hold)), i.e. ~3x deeper than the best favourable excursion ever
+   * observed (+11.2% MFE). The target still comes from `targetMode`.
+   * Rollback: `CRYPTO_STOP_MODE=sigmah` + rebuild the server image.
+   */
+  stop: {
+    mode: 'sigmah' | 'atr';
+    atrMultiple: number;
+    minPct: number;
+    maxPct: number;
+  };
+  /** trailing exit: ratchet in R of the initial stop distance (broker.ts) */
+  trail: TrailConfig;
+  /** walk-forward entry threshold (calibrate.ts) */
+  threshold: EntryThresholdConfig;
+  /** multi-venue + pullback confirmation gate (confirm.ts) */
+  confirm: EntryConfirmConfig;
   /** exchange taker fee per side (Kraken tier 1 = 0.16%, default 0.25%) */
   feePct: number;
   minRiskReward: number;
@@ -108,7 +187,6 @@ export interface CryptoConfig {
    */
   targetMode: 'sr' | 'atr3' | 'sigmah';
   reentryCooldownSessions: number;
-  stopAtrMultiple: number;
   maxHoldSessions: number;
   fillMode: 'AT_SIGNAL' | 'NEXT_OPEN';
   /**
@@ -157,6 +235,12 @@ export interface CryptoConfig {
 function num(v: string | undefined, d: number): number {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : d;
+}
+
+/** Percentile cut for the entry threshold: 1..99, never 0 or 100 (a cut at
+ *  an endpoint would keep everything or nothing and prove nothing). */
+function clampPct(v: number): number {
+  return Math.min(99, Math.max(1, Math.round(v)));
 }
 
 const PART_KEYS = ['technical', 'fundamental', 'event', 'sentiment', 'macro', 'regime'] as const;
@@ -212,6 +296,41 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
     startCapital: num(env.CRYPTO_CAPITAL, 100_000),
     riskPerTradePct: num(env.CRYPTO_RISK_PER_TRADE, 0.0075),
     maxPositionPct: num(env.CRYPTO_MAX_POSITION, 0.10),
+    maxRiskUsd: num(env.CRYPTO_MAX_RISK_USD, 250),
+    stop: {
+      mode: env.CRYPTO_STOP_MODE === 'sigmah' ? 'sigmah' : 'atr',
+      // 0.5 x daily ATR14, clamped to [0.1, 5]: the old parsed-but-inert
+      // default of 2 would have sat 10-25% below entry (2 x a 5-12% ATR),
+      // i.e. barely tighter than the geometry C stop it replaces.
+      atrMultiple: Math.min(Math.max(num(env.CRYPTO_STOP_ATR_MULTIPLE, 0.5), 0.1), 5),
+      minPct: num(env.CRYPTO_STOP_MIN_PCT, 0.005),
+      maxPct: num(env.CRYPTO_STOP_MAX_PCT, 0.04),
+    },
+    trail: {
+      enabled: env.CRYPTO_TRAIL_ENABLED !== '0',
+      // activate at 0.75R (+3% at the shipped 4% stop), trail 0.5R behind the
+      // peak: at activation the trail sits 0.25R ABOVE entry, so it can never
+      // arm below breakeven and immediately "exit" the position.
+      activateR: Math.min(Math.max(num(env.CRYPTO_TRAIL_ACTIVATE_R, 0.75), 0.05), 5),
+      distanceR: Math.min(Math.max(num(env.CRYPTO_TRAIL_DISTANCE_R, 0.5), 0.05), 5),
+    },
+    threshold: {
+      enabled: env.CRYPTO_ENTRY_THRESHOLD !== '0',
+      percentile: clampPct(num(env.CRYPTO_ENTRY_THRESHOLD_PCT, 50)),
+      minSamples: Math.max(10, Math.floor(num(env.CRYPTO_ENTRY_THRESHOLD_MIN, 60))),
+      forwardDays: Math.max(1, Math.floor(num(env.CRYPTO_ENTRY_THRESHOLD_FORWARD, 1))),
+    },
+    confirm: {
+      enabled: env.CRYPTO_ENTRY_CONFIRM !== '0',
+      windowMs: num(env.CRYPTO_PULLBACK_WINDOW_MS, 1_800_000),
+      minTicks: Math.max(2, Math.floor(num(env.CRYPTO_PULLBACK_MIN_TICKS, 3))),
+      atrMultiple: Math.min(Math.max(num(env.CRYPTO_PULLBACK_ATR_MULTIPLE, 0.15), 0), 1),
+      minPct: num(env.CRYPTO_PULLBACK_MIN_PCT, 0.0025),
+      maxPct: num(env.CRYPTO_PULLBACK_MAX_PCT, 0.03),
+      venueWindowMs: num(env.CRYPTO_VENUE_WINDOW_MS, 300_000),
+      maxAgeMs: num(env.CRYPTO_ENTRY_MAX_AGE_MS, 120_000),
+      venueRequireUp: env.CRYPTO_VENUE_REQUIRE_UP !== '0',
+    },
     feePct: num(env.CRYPTO_FEE_PCT, 0.0025),
     minRiskReward: num(env.CRYPTO_MIN_RISK_REWARD, 1.5),
     minSignalConfidence: Math.min(num(env.CRYPTO_MIN_SIGNAL_CONFIDENCE, 0.7), 1),
@@ -219,7 +338,6 @@ export function cryptoConfigFromEnv(env: Record<string, string | undefined> = pr
       ? env.CRYPTO_TARGET_MODE
       : 'sr',
     reentryCooldownSessions: Math.min(num(env.CRYPTO_REENTRY_COOLDOWN, 1), 30),
-    stopAtrMultiple: Math.min(num(env.CRYPTO_STOP_ATR_MULTIPLE, 2), 5),
     maxHoldSessions: num(env.CRYPTO_MAX_HOLD, 20),
     fillMode: env.CRYPTO_FILL_MODE === 'NEXT_OPEN' ? 'NEXT_OPEN' : 'AT_SIGNAL',
     entryStopGuard: bool(env.CRYPTO_ENTRY_STOP_GUARD, true),

@@ -28,6 +28,7 @@ import {
 import { activeSymbols, ingestTick, refreshBars, runCryptoScan, CRYPTO_STRATEGY } from './engine.ts';
 import type { CryptoMarketDataProvider } from './providers/types.ts';
 import type { CryptoPriceStream } from './stream.ts';
+import type { TickTape } from './tape.ts';
 import {
   decideUniverse, fetchRanking, fetchTradable, loadUniverseStates, saveUniverseStates, seedStates,
 } from './universe.ts';
@@ -37,6 +38,8 @@ export interface CryptoSchedulerDeps {
   provider: CryptoMarketDataProvider;
   config: CryptoConfig;
   stream?: CryptoPriceStream | null;
+  /** entry-confirmation tape (observer); absent = the pullback leg reports NO_DATA */
+  tape?: TickTape | undefined;
   cycleMs?: number;
 }
 
@@ -122,6 +125,7 @@ export class CryptoScheduler {
   private readonly provider: CryptoMarketDataProvider;
   private readonly config: CryptoConfig;
   private readonly stream: CryptoPriceStream | null;
+  private readonly tape: TickTape | undefined;
   private readonly cycleMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly lastRun = new Map<string, number>();
@@ -133,6 +137,7 @@ export class CryptoScheduler {
     this.provider = deps.provider;
     this.config = deps.config;
     this.stream = deps.stream ?? null;
+    this.tape = deps.tape;
     this.cycleMs = deps.cycleMs ?? 5_000;
   }
 
@@ -207,7 +212,7 @@ export class CryptoScheduler {
       await this.runJob('snapshot', () => snapshotEquity(db, config, now));
     }
     if (this.due('signal_scan', config.scanIntervalSec * 1000, now)) {
-      await this.runJob('signal_scan', () => runCryptoScan({ db, provider, config, now }));
+      await this.runJob('signal_scan', () => runCryptoScan({ db, provider, config, now, tape: this.tape }));
     }
 
     /* ---------- settlement + learning ---------- */

@@ -18,7 +18,10 @@ separate scheduler, separate UI at `/crypto` (edge: `/pp/crypto`).
 | `broker.ts` | fee-aware fills (buy the ask / sell the bid; liquidity-scaled slippage when no book), fee-inclusive `net_pnl`/`return_pct`, BTC benchmark, 24/7 order processing + position monitoring, daily-bar settle |
 | `workers.ts` | `CryptoScheduler` — due-gated job cycle (below) + `snapshotEquity` + `refreshUniverse` |
 | `runtime.ts` | `CryptoRuntime` — DB + provider + stream + scheduler; workers only under `CRYPTO_WORKERS=1` |
-| `routes.ts` | `/api/crypto/*` (see `docs/CRYPTO-API.md`) |
+| `routes.ts` | `/api/crypto/*` (see `docs/CRYPTO-API.md`); `/entrygate` reports the entry-gate state and `overview.calibration` the predicted-vs-realized diagnostic |
+| `calibrate.ts` | walk-forward **entry threshold** over the recorded signal history — evidence floor, fixed feature order, `INSUFFICIENT_DATA` rather than an invented cut (see `docs/CRYPTO-ENTRY-GATE.md`) |
+| `confirm.ts` | pre-order **confirmation gate**: pullback from the Kraken tape + Kraken-vs-Coinbase direction read from `xchange_samples`; missing/stale data passes and says so |
+| `tape.ts` | `TickTape` — bounded in-memory per-symbol window fed by the stream's `tickObservers` (observer only: no socket, no poll, no writes) |
 
 Web: `apps/web/src/crypto/` — shell (`index.tsx`), routing/data (`data.tsx`),
 client (`api.ts`), 6 pages (`Overview, Market, Signals, Paper Trading,

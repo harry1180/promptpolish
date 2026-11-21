@@ -350,14 +350,44 @@ export async function monitorPositions(
       .run(price, now, mfe, mae, p.id);
     marked += 1;
 
+    // TRAILING EXIT: ratchet the trail up in R of the INITIAL stop distance.
+    // Activation at trail.activateR above entry (default 0.5R) puts the trail
+    // near breakeven, and it only ever moves up — so a winner is no longer
+    // handed back to a fixed stop that sat far below entry. Writes only when
+    // the trail actually improves, and the new value is visible to the
+    // checkExit call in the same iteration.
+    if (config.trail.enabled) {
+      const stopDist = p.entry_price - p.stop;
+      if (stopDist > 0 && price >= p.entry_price + stopDist * config.trail.activateR) {
+        const previous = p.trailing_stop ?? p.stop;
+        const candidate = Math.max(price - stopDist * config.trail.distanceR, p.stop);
+        const next = Math.max(candidate, previous);
+        if (next > previous) {
+          db.prepare('UPDATE paper_positions SET trailing_stop = ? WHERE id = ?').run(next, p.id);
+          p.trailing_stop = next;
+        }
+      }
+    }
+
+    // tucore's checkExit tests `bar.low <= trailingStop`, and `low` here is
+    // min(price, entry, previous mark) — it always contains the ENTRY price,
+    // which sits below any armed trail, so handing the trail to checkExit would
+    // fire TRAILING_STOP the instant the trail is set (it did, in review). The
+    // trail is therefore evaluated against the CURRENT price only, below: a
+    // trail fires when the market trades back down to it, never because the
+    // fill price is in the window.
     const reason = checkExit(
       {
         side: 'LONG', entryPrice: p.entry_price, qty: p.qty, target: p.target, stop: p.stop,
-        trailingStop: p.trailing_stop, maxHoldSessions: p.max_hold, sessionsHeld: p.sessions_held,
+        trailingStop: null, maxHoldSessions: p.max_hold, sessionsHeld: p.sessions_held,
         thesisInvalidated: p.thesis_status === 'INVALIDATED', sellSignal: false,
         regimeChanged: false, // crypto has no regime table in v1 (see header)
       },
       { open: price, high, low, close: price, date: etDate(now) },
+    ) ?? (
+      config.trail.enabled && p.trailing_stop !== null && p.trailing_stop > 0 && price <= p.trailing_stop
+        ? 'TRAILING_STOP' as const
+        : null
     );
     if (reason) {
       const bid = (q as { bid?: number } | undefined)?.bid;

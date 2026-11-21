@@ -17,10 +17,13 @@ import type { DatabaseSync } from 'node:sqlite';
 import { detectRegime, etDate, evaluateEntry, fuse, shortTermScore } from '@promptslim/tucore';
 import type { Quote, Regime, ScoreParts, SignalAction } from '@promptslim/tucore';
 import { learnedWeights } from '../tradingusa/adaptive.ts';
+import { entryMove, entryThreshold, evaluateThreshold, type ThresholdState } from './calibrate.ts';
 import type { CryptoConfig } from './config.ts';
 import { CRYPTO_BENCHMARK, CRYPTO_PORTFOLIO, latestQuote, loadBars, upsertBar, upsertQuote } from './broker.ts';
+import { evaluateConfirmation, type ConfirmResult } from './confirm.ts';
 import { entryBandOverlapsStop, validateEntryGeometry } from './guard.ts';
 import type { CryptoMarketDataProvider } from './providers/types.ts';
+import type { TickTape } from './tape.ts';
 
 export const CRYPTO_STRATEGY = 'crypto_momentum_v1';
 
@@ -50,6 +53,38 @@ export function sigmahGeometry(
 /** Regimes that would block a long entry in equities — recorded for crypto
  *  but NOT gating in v1 (see broker header: no regime table for crypto). */
 const ADVERSE_REGIMES = new Set<Regime>(['BEAR_TREND', 'RISK_OFF', 'LIQUIDITY_STRESS', 'HIGH_VOLATILITY', 'UNCERTAIN']);
+
+/**
+ * Volatility-scaled stop (config.stop.mode = 'atr', the default).
+ *
+ * depth = clamp(atrMultiple * ATR14/price, minPct, maxPct), stop = price * (1 - depth).
+ * Measured on the 14 closed trades: daily ATR14 at entry was 4.9-12.4% of
+ * price while the stop that was actually used sat 1.0-26.8% below entry
+ * (geometry C: 1.0 * ATR/price * sqrt(hold)), i.e. ~3x deeper than the best
+ * favourable excursion the book ever saw (+11.2% MFE, avg +3.4%) — which is
+ * why 14/14 exits were STOP_REACHED. At the shipped defaults the same entries
+ * would stop 2.4-4.0% below entry (0.5 x ATR, capped at 4%).
+ * Returns null when the inputs are unusable — the caller keeps the existing stop.
+ */
+export function atrStopGeometry(
+  price: number,
+  atr14: number,
+  cfg: CryptoConfig['stop'],
+): { stop: number; stopPct: number; atrPct: number } | null {
+  if (!(price > 0) || !(atr14 > 0)) return null;
+  const atrPct = atr14 / price;
+  const depth = Math.min(Math.max(atrPct * cfg.atrMultiple, cfg.minPct), cfg.maxPct);
+  // The sane gate re-derives the distance as `price - stop` and compares it to
+  // `price * 0.005`, so a stop written as price * (1 - depth) at exactly the
+  // 0.5% floor lands one ULP under that floor (measured: 11.199999999999818 vs
+  // 11.200000000000001) and the entry is rejected for a rounding error. Scale
+  // by (1 + 1e-9) — 4e-9 of price, invisible next to a 0.5-4% stop — so the
+  // floor is cleared by construction.
+  const stopDist = price * depth * (1 + 1e-9);
+  const stop = price - stopDist;
+  if (!(stop > 0) || stop >= price) return null;
+  return { stop, stopPct: (price - stop) / price * 100, atrPct: atrPct * 100 };
+}
 
 export function activeSymbols(db: DatabaseSync): string[] {
   const rows = db
@@ -142,6 +177,16 @@ export interface CryptoScanResult {
   skippedLesson: number;
   /** orders rejected by the entry/stop geometry guard (approved fix 1) */
   skippedGeometry: number;
+  /** BUY candidates blocked by the walk-forward entry threshold (calibrate.ts) */
+  skippedThreshold: number;
+  /** BUY candidates blocked by the multi-venue / pullback confirmation gate */
+  skippedConfirm: number;
+  /** BUY candidates whose size was trimmed by the hard dollar risk cap */
+  riskCapped: number;
+  /** BUY candidates whose size was trimmed to zero by the dollar risk cap */
+  riskCappedOut: number;
+  /** entries where the ATR stop was dropped: too deep for the target's R:R floor */
+  atrStopFallback: number;
   /** advisory: signals whose entry band dips into the stop floor */
   bandOverlap: number;
   /** BUY candidates ranked by the SHADOW top-K recorder (never gates a trade) */
@@ -154,18 +199,30 @@ interface ScanDeps {
   provider: CryptoMarketDataProvider;
   config: CryptoConfig;
   now?: number;
+  /** in-memory Kraken tape (observer) feeding the pullback leg; absent = NO_DATA */
+  tape?: TickTape | undefined;
 }
 
 /** One scan over the active universe -> signals + spot paper orders. */
 export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
   const { db, provider, config } = deps;
+  const tape = deps.tape;
   const now = deps.now ?? Date.now();
   const sessionDate = etDate(now);
   const result: CryptoScanResult = {
     scanned: 0, signalsCreated: 0, ordersCreated: 0, skippedDuplicate: 0,
     skippedConfidence: 0, skippedRisk: 0, skippedLesson: 0,
-    skippedGeometry: 0, bandOverlap: 0, shadowRanked: 0, created: [],
+    skippedGeometry: 0, skippedThreshold: 0, skippedConfirm: 0,
+    riskCapped: 0, riskCappedOut: 0, atrStopFallback: 0,
+    bandOverlap: 0, shadowRanked: 0, created: [],
   };
+
+  // Walk-forward entry threshold, computed ONCE per scan from the recorded
+  // history strictly before today's session (calibrate.ts). Read-only; when
+  // the evidence floor is not met the state says so and blocks nothing.
+  const thresholdState: ThresholdState = entryThreshold(db, config.threshold, {
+    asOf: sessionDate, strategy: CRYPTO_STRATEGY,
+  });
 
   const symbols = activeSymbols(db);
   if (symbols.length === 0) return result;
@@ -237,6 +294,27 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
       const atr14 = Number(st.factors.atr ?? 0);
       if (atr14 > 0 && quote.price + 3 * atr14 > st.target) {
         st.target = quote.price + 3 * atr14;
+      }
+    }
+    // VOLATILITY-SCALED STOP (config.stop.mode = 'atr', default): replaces the
+    // stop only — the target still comes from targetMode above. Rolled back
+    // with CRYPTO_STOP_MODE=sigmah, which leaves geometry C's stop in place.
+    //
+    // The swap is conditional on the target still being able to PAY for the
+    // stop: if the resulting risk/reward falls under minRiskReward the stop
+    // would be a near-certain loss with nothing to win, so the strategy's own
+    // stop is kept and the entry is counted in `atrStopFallback` (the sane
+    // gate then decides as it always did). Same fallback contract as
+    // sigmahGeometry's null return — a rule never forces bad geometry.
+    const atr14 = Number(st.factors.atr ?? 0);
+    const atrStop = config.stop.mode === 'atr' ? atrStopGeometry(quote.price, atr14, config.stop) : null;
+    if (atrStop) {
+      const stopDist = quote.price - atrStop.stop;
+      const rr = stopDist > 0 ? (st.target - quote.price) / stopDist : Number.NEGATIVE_INFINITY;
+      if (st.target > quote.price && rr >= config.minRiskReward) {
+        st.invalidation = atrStop.stop;
+      } else {
+        result.atrStopFallback += 1;
       }
     }
 
@@ -314,11 +392,53 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
     if (candidate) buyCandidates.push(candidate);
 
     if (action === 'BUY' && risk.approved && !held.has(symbol) && risk.sizeShares > 0) {
+      // --- (a) HARD per-trade dollar risk cap -----------------------------
+      // shares * stopDistance can never exceed config.maxRiskUsd, whatever the
+      // percentage caps allowed. Independent of (and applied before) sizing
+      // checks, so a tight stop cannot blow the cap up through bigger size.
+      const stopDist = Math.max(0.0001, quote.price - st.invalidation);
+      let sizeShares = risk.sizeShares;
+      const capShares = Math.floor(config.maxRiskUsd / stopDist);
+      if (capShares < sizeShares) {
+        sizeShares = Math.max(0, capShares);
+        if (sizeShares === 0) result.riskCappedOut += 1; else result.riskCapped += 1;
+      }
+
+      // --- (b) WALK-FORWARD ENTRY THRESHOLD -------------------------------
+      const move = entryMove(bars, sessionDate, quote.price);
+      const threshold = evaluateThreshold(thresholdState, move);
+
+      // --- (c) MULTI-VENUE / PULLBACK CONFIRMATION ------------------------
+      const execRef = quote.ask != null && quote.ask > 0 ? quote.ask : quote.price;
+      const confirm: ConfirmResult = sizeShares > 0 && threshold.ok
+        ? evaluateConfirmation({
+            db, cfg: config.confirm, tape, symbol, price: quote.price,
+            atrPct: atr14 > 0 ? atr14 / quote.price : 0, now,
+          })
+        : { ok: true, pullback: { code: 'DISABLED', requiredPct: null, observedPct: null, ticks: null, lastAgeMs: null },
+            venue: { code: 'DISABLED', symbol: null, majority: null, agreement: null, referenceAgrees: null, krakenPct: null, coinbasePct: null, ageMs: null },
+            reason: '' };
+
+      const gateCode = sizeShares <= 0
+        ? 'RISK_CAP'
+        : !threshold.ok ? 'THRESHOLD' : !confirm.ok ? confirm.reason : '';
+
+      if (gateCode) {
+        if (gateCode === 'THRESHOLD') result.skippedThreshold += 1;
+        else if (gateCode !== 'RISK_CAP') result.skippedConfirm += 1;
+        db.prepare('INSERT INTO audit_log (ts, action, entity, entity_id, detail_json) VALUES (?, ?, ?, ?, ?)')
+          .run(now, 'entry_gate', 'signal', String(signalId), JSON.stringify({
+            code: gateCode, ticker: symbol, price: quote.price, stop: st.invalidation,
+            stopPct: Math.round((stopDist / quote.price) * 10000) / 100,
+            requestedShares: risk.sizeShares, maxRiskUsd: config.maxRiskUsd,
+            entryMove: move, threshold, confirm,
+            note: 'paper-only gate: the signal is recorded, no order is created',
+          }));
+      } else {
       // Entry/stop geometry guard (approved correction item 1): the
       // executable entry must clear stop + buffer or no order is ever
       // created — rejected before submission, with a reason code in
       // audit_log. No clamping, no stop widening, no live-order changes.
-      const execRef = quote.ask != null && quote.ask > 0 ? quote.ask : quote.price;
       const verdict = config.entryStopGuard
         ? validateEntryGeometry({
             side: 'BUY', executablePrice: execRef, bandLow: st.entryLow,
@@ -338,9 +458,10 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
         db.prepare(
           `INSERT INTO paper_orders (portfolio, signal_id, ticker, side, qty, limit_price, stop_price, status, fill_mode, created_at)
            VALUES (?,?,?,?,?,?,?,'PENDING',?,?)`,
-        ).run(CRYPTO_PORTFOLIO, signalId, symbol, 'BUY', risk.sizeShares, st.entryHigh, st.invalidation, config.fillMode, now);
+        ).run(CRYPTO_PORTFOLIO, signalId, symbol, 'BUY', sizeShares, st.entryHigh, st.invalidation, config.fillMode, now);
         result.ordersCreated += 1;
         if (candidate) candidate.ordered = true;
+      }
       }
     } else if (action === 'SELL' && held.has(symbol)) {
       const pos = db.prepare('SELECT qty FROM paper_positions WHERE ticker = ? AND exit_ts IS NULL').get(symbol) as { qty: number } | undefined;
@@ -383,6 +504,11 @@ export async function runCryptoScan(deps: ScanDeps): Promise<CryptoScanResult> {
       skippedConfidence: result.skippedConfidence, skippedLesson: result.skippedLesson,
       skippedDuplicate: result.skippedDuplicate,
       skippedGeometry: result.skippedGeometry, bandOverlap: result.bandOverlap,
+      skippedThreshold: result.skippedThreshold, skippedConfirm: result.skippedConfirm,
+      riskCapped: result.riskCapped, riskCappedOut: result.riskCappedOut,
+      atrStopFallback: result.atrStopFallback,
+      threshold: { status: thresholdState.status, feature: thresholdState.feature, cut: thresholdState.threshold },
+      confirm: { enabled: config.confirm.enabled, stopMode: config.stop.mode, maxRiskUsd: config.maxRiskUsd },
     }));
 
   return result;

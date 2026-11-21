@@ -9,6 +9,7 @@ import { ensureSpotPortfolio } from './broker.ts';
 import { activeSymbols, ingestTick } from './engine.ts';
 import { KrakenProvider } from './providers/kraken-provider.ts';
 import { CryptoPriceStream } from './stream.ts';
+import { TickTape } from './tape.ts';
 import { CryptoScheduler } from './workers.ts';
 import { MicroEngine } from './micro/features.ts';
 import { XchangeManager } from '../xchange/registry.ts';
@@ -37,6 +38,13 @@ export class CryptoRuntime {
   readonly xchange: XchangeManager;
   /** set after the observer exists so the stream closure never reads early */
   private onKrakenTick: ((q: { symbol: string; price: number; ts: number; bid?: number; ask?: number }) => void) | null = null;
+  /**
+   * Kraken tape for the entry-confirmation pullback leg — fed by the existing
+   * stream through a tick observer (and by the REST fallback in `restPoll`),
+   * read by the scan when it is about to create a BUY order. In-memory only:
+   * no new socket, no extra polling, no writes, no path into the broker.
+   */
+  readonly entryTape: TickTape;
   private started = false;
   /**
    * Observer taps for the BTC spot tape (Kalshi 15-minute engine). Arrays are
@@ -64,6 +72,7 @@ export class CryptoRuntime {
     // seed the socket with the pinned members; the universe job swaps in the
     // full active list (stream.updateSymbols) once it has fetched ranks
     const initial = activeSymbols(this.db);
+    this.entryTape = new TickTape({ windowMs: this.config.confirm.windowMs });
     this.stream = new CryptoPriceStream({
       symbols: initial.length > 0 ? initial : [...PINNED],
       onTick: (q) => {
@@ -75,9 +84,18 @@ export class CryptoRuntime {
           try { hook(q); } catch { /* tape is an observer; trading unaffected */ }
         }
       },
+      // entry-confirmation tape: a tick OBSERVER behind the production ingest,
+      // registered on the same socket — no second connection, no extra poll
+      tickObservers: [(q) => {
+        try { this.entryTape.observe({ symbol: q.symbol, price: q.price, ts: q.ts }); } catch { /* observer only */ }
+      }],
       restPoll: async () => {
         const quotes = await this.provider.getQuotes(activeSymbols(this.db));
         if (quotes.length > 0) ingestTick(this.db, quotes);
+        // REST fallback keeps the same tape alive while the socket is down
+        for (const q of quotes) {
+          try { this.entryTape.observe({ symbol: q.symbol, price: q.price, ts: q.ts }); } catch { /* observer only */ }
+        }
         return quotes.length;
       },
       restPollMs: this.config.restPollMs,
@@ -103,7 +121,7 @@ export class CryptoRuntime {
       : null;
     this.scheduler = new CryptoScheduler({
       db: this.db, provider: this.provider, config: this.config,
-      stream: this.stream, ...(opts.cycleMs ? { cycleMs: opts.cycleMs } : {}),
+      stream: this.stream, tape: this.entryTape, ...(opts.cycleMs ? { cycleMs: opts.cycleMs } : {}),
     });
     // Observer layer: constructed always (tables exist, endpoints answer),
     // sockets start only when workers run — same gate as the trading cycle.

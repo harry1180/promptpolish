@@ -52,6 +52,14 @@ export interface PriceStreamOptions {
    * that throws can never affect the production ingest path.
    */
   rawObservers?: Array<(text: string) => void>;
+  /**
+   * Additional PER-TICK observers, invoked after `onTick` has run for the
+   * quote, each inside try/catch — same observer contract as `rawObservers`.
+   * Used by the entry-confirmation tape (confirm/pullback leg): it needs the
+   * parsed quote, not the raw frame, and must never disturb the ingest path.
+   * Absent/empty = the production path is byte-identical to before.
+   */
+  tickObservers?: Array<(q: TickQuote) => void>;
 }
 
 /** Kraken's v2 websocket names bitcoin BTC. The v1 legacy alias is rejected
@@ -189,8 +197,15 @@ export class CryptoPriceStream {
     });
     socket.on('message', (data: unknown) => {
       const text = typeof data === 'string' ? data : String(data);
-      for (const q of parseTickerMessage(text, this._symbols, (this.opts.now ?? Date.now)())) {
-        this.opts.onTick(q);
+      const quotes = parseTickerMessage(text, this._symbols, (this.opts.now ?? Date.now)());
+      for (const q of quotes) this.opts.onTick(q);
+      // observers run AFTER the production parse + ingest, never in front of it
+      if (quotes.length > 0) {
+        for (const obs of this.opts.tickObservers ?? []) {
+          for (const q of quotes) {
+            try { obs(q); } catch { /* observers never break ingest */ }
+          }
+        }
       }
       // observer runs AFTER the production parse, never in front of it
       if (this.opts.onRawMessage) {

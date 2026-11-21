@@ -11,10 +11,11 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
-import { FUSION_WEIGHTS } from '@promptslim/tucore';
+import { FUSION_WEIGHTS, etDate } from '@promptslim/tucore';
 import { learnedWeights } from '../tradingusa/adaptive.ts';
 import { experimentSummary } from '../tradingusa/experiments.ts';
 import { evaluateFixedHorizons } from './accuracy.ts';
+import { entryThreshold } from './calibrate.ts';
 import { handleXchange } from '../xchange/routes.ts';
 import { CRYPTO_SESSION, type CryptoConfig } from './config.ts';
 import { k15mCounts, recentSamples, recentSignals, signalSummary, windowRows } from '../kalshi15m/store.ts';
@@ -145,6 +146,34 @@ function universeView(db: DatabaseSync): {
   };
 }
 
+/**
+ * Direction-accuracy diagnostic for the closed paper book: what the signals
+ * said vs what happened, in one block, so an inverted predictor is visible
+ * instead of buried in the ledger. `predicted_return` is the signal's TARGET
+ * DISTANCE (always positive by construction — geometry C aims 2*sigma_H above
+ * entry), which is why sign-comparison has read 0/14; the note says exactly
+ * that rather than letting the number pretend to be a forecast.
+ */
+function calibrationView(db: DatabaseSync): Record<string, unknown> | null {
+  const rows = db
+    .prepare(`SELECT predicted_return, actual_return FROM paper_trades WHERE status = 'CLOSED'`)
+    .all() as unknown as Array<{ predicted_return: number; actual_return: number }>;
+  if (rows.length === 0) return null;
+  const n = rows.length;
+  const avg = (k: 'predicted_return' | 'actual_return'): number =>
+    rows.reduce((s, r) => s + Number(r[k] ?? 0), 0) / n;
+  const correct = rows.filter((r) => (r.predicted_return > 0) === (r.actual_return > 0)).length;
+  const r2 = (v: number): number => Math.round(v * 100) / 100;
+  return {
+    closedTrades: n,
+    avgPredictedPct: r2(avg('predicted_return') * 100),
+    avgRealizedPct: r2(avg('actual_return') * 100),
+    directionCorrect: correct,
+    directionAccuracyPct: r2((correct / n) * 100),
+    note: 'predicted_return is the recorded target distance (always positive by construction), not a probability forecast — compare magnitude, not only sign',
+  };
+}
+
 export async function handleCrypto(
   req: IncomingMessage,
   res: ServerResponse,
@@ -240,6 +269,7 @@ export async function handleCrypto(
             returnPct: btcStart > 0 ? Math.round(((btcNow - btcStart) / btcStart) * 10000) / 100 : 0,
           },
           stats,
+          calibration: calibrationView(db),
           positions,
           recentTrades: recent,
           snapshotAt: snap?.ts ?? null,
@@ -416,6 +446,43 @@ export async function handleCrypto(
           selected: counts.sel,
           takenByProduction: counts.taken,
           outcomes,
+          recent,
+        },
+      });
+    }
+
+    /* ---------------- entry gates: threshold + confirmation (paper) ---------------- */
+    if (rest.length === 1 && rest[0] === 'entrygate' && req.method === 'GET') {
+      const threshold = entryThreshold(db, config.threshold, {
+        asOf: etDate(now), strategy: CRYPTO_STRATEGY,
+      });
+      const gateCounts = db
+        .prepare(
+          `SELECT json_extract(detail_json, '$.code') AS code, COUNT(*) AS n
+             FROM audit_log WHERE action = 'entry_gate' GROUP BY code ORDER BY n DESC`,
+        )
+        .all() as unknown as Array<{ code: string | null; n: number }>;
+      const recent = db
+        .prepare(
+          `SELECT ts, entity_id AS signalId, detail_json FROM audit_log
+            WHERE action = 'entry_gate' ORDER BY id DESC LIMIT 20`,
+        )
+        .all() as unknown as Array<Record<string, unknown>>;
+      const buyOrders = db.prepare(`SELECT COUNT(*) AS n FROM paper_orders WHERE side = 'BUY'`).get() as { n: number };
+      const fills = db.prepare(`SELECT COUNT(*) AS n FROM paper_orders WHERE side = 'BUY' AND status = 'FILLED'`).get() as { n: number };
+      return done({
+        status: 200,
+        body: {
+          decisionImpact: 'PAPER_ONLY — these gates decide paper orders only; no live order path exists in this book',
+          rollback: 'CRYPTO_ENTRY_CONFIRM=0 (confirmation gate) · CRYPTO_ENTRY_THRESHOLD=0 (threshold) · CRYPTO_STOP_MODE=sigmah (stop) · CRYPTO_TRAIL_ENABLED=0 (trail)',
+          stop: { mode: config.stop.mode, atrMultiple: config.stop.atrMultiple, minPct: config.stop.minPct, maxPct: config.stop.maxPct },
+          trail: config.trail,
+          maxRiskUsd: config.maxRiskUsd,
+          confirm: config.confirm,
+          threshold,
+          gateCounts,
+          buyOrdersCreated: buyOrders.n,
+          buyOrdersFilled: fills.n,
           recent,
         },
       });
