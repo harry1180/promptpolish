@@ -105,6 +105,31 @@ describe('Crypto Kalshi 15m tab', () => {
     });
   });
 
+  it('renders when the server sends fairValue: null (rollover / empty-book state)', async () => {
+    // REAL server shape: status() emits fairValue: null whenever there is no
+    // window yet or the book is empty — at engine restart and every 15-minute
+    // rollover. undefined-checks alone let null through and the page died:
+    // "Cannot read properties of null (reading 'reference')".
+    stubFetch({
+      kalshi15m: {
+        enabled: true,
+        series: 'KXBTC15M',
+        window: { eventTicker: 'KXBTC15M-21NOV203300', phase: 'OPEN' },
+        fairValue: null,
+      },
+    });
+    render(<Crypto />);
+
+    expect(await screen.findByText('Window & feed')).toBeTruthy();
+    expect(await screen.findByText('Fair value & calibration')).toBeTruthy();
+    expect(await screen.findByText(/No fair value yet/)).toBeTruthy();
+    // the page survives: every other section still renders, no error boundary
+    expect(await screen.findByText('Strategies')).toBeTruthy();
+    expect(await screen.findByText('Paper execution')).toBeTruthy();
+    expect(await screen.findByText('Recent signals')).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('survives an unknown {} payload instead of crashing the shell', async () => {
     stubFetch({ kalshi15m: {}, 'kalshi15m/calibration': {}, 'kalshi15m/signals': {}, 'kalshi15m/paper': {} });
     render(<Crypto />);

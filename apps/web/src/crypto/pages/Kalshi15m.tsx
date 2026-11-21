@@ -169,8 +169,12 @@ function FairValue({
         <Loading label="Loading fair value…" />
       ) : status.data.enabled === false ? (
         <p className="text-sm text-mist">{status.data.note ?? 'Engine off — no fair value is computed.'}</p>
-      ) : fair === undefined ? (
-        <p className="text-sm text-mist">No fair value in the status payload.</p>
+      ) : fair == null ? (
+        // the server sends fairValue: null while there is no window or the book
+        // is empty (rollover, pre-open) — null is a STATE, not an error
+        <p className="text-sm text-mist">
+          No fair value yet — {status.data.window ? 'the book is empty for this window' : 'no active window'}.
+        </p>
       ) : (
         <>
           <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -346,7 +350,7 @@ function Paper({ paper, reloadAll }: { paper: ReturnType<typeof useEndpoint<K15m
       <RetryRow error={paper.error} reload={paper.reload} />
       {actionError && <p role="alert" className="mb-3 text-xs text-amber-soft">Paper action failed: {actionError}</p>}
 
-      {p === undefined ? (
+      {p == null ? (
         <Loading label="Loading paper ledger…" />
       ) : p.enabled === false ? (
         <p className="text-sm text-mist">Paper engine is off (K15mRuntime not constructed in this process).</p>
