@@ -26,6 +26,7 @@ import { ErrorBoundary, StatusPill, time } from '../tradingusa/ui';
 
 import { OverviewPage } from './pages/Overview';
 import { MarketPage } from './pages/Market';
+import { Kalshi15mPage } from './pages/Kalshi15m';
 import { SignalsPage } from './pages/Signals';
 import { PaperTradingPage } from './pages/PaperTrading';
 import { LearningPage } from './pages/Learning';
@@ -39,6 +40,8 @@ function renderRoute(key: string): ReactNode {
       return <OverviewPage />;
     case 'market':
       return <MarketPage />;
+    case 'kalshi15m':
+      return <Kalshi15mPage />;
     case 'signals':
       return <SignalsPage />;
     case 'paper-trading':

@@ -29,6 +29,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { key: 'overview', to: `${BASE_PATH}/overview`, label: 'Overview' },
   { key: 'market', to: `${BASE_PATH}/market`, label: 'Market' },
+  { key: 'kalshi15m', to: `${BASE_PATH}/kalshi15m`, label: 'Kalshi 15m' },
   { key: 'signals', to: `${BASE_PATH}/signals`, label: 'Signals' },
   { key: 'paper-trading', to: `${BASE_PATH}/paper-trading`, label: 'Paper Trading' },
   { key: 'learning', to: `${BASE_PATH}/learning`, label: 'Learning' },

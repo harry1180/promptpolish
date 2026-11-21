@@ -519,3 +519,241 @@ export const getSources = (symbol = 'BTC'): Promise<SourcesResponse> =>
 export const getContext = (): Promise<ContextResponse> => get<ContextResponse>('/context');
 
 export const getAccuracy = (): Promise<AccuracyResponse> => get<AccuracyResponse>('/accuracy');
+
+/* ------------------------------------------------------------------ */
+/* Kalshi 15-minute engine (KXBTC15M) — read-only                      */
+/* mirrors server/src/crypto/routes.ts `/kalshi15m/*`. Every field is  */
+/* optional: the engine may be off ({enabled:false, note}) and the      */
+/* fixtures answer '{}' for an unknown path, so consumers must default. */
+/* ------------------------------------------------------------------ */
+
+export interface K15mWindowView {
+  eventTicker?: string;
+  marketTicker?: string;
+  openTs?: number;
+  closeTs?: number;
+  expireTs?: number;
+  strike?: number | null;
+  phase?: string;
+  msToClose?: number | null;
+  source?: string;
+}
+
+export interface K15mSocketView {
+  live?: boolean;
+  connects?: number;
+  reconnects?: number;
+  errors?: number;
+  lastError?: string | null;
+  framesSeen?: number;
+  lastFrameAt?: number | null;
+  stalenessMs?: number | null;
+  stale?: boolean;
+}
+
+export interface K15mBookView {
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  spread?: number | null;
+  imbalance?: number | null;
+  ofi?: number | null;
+  cancelRatio?: number | null;
+  deltasInWindow?: number;
+  trades1s?: number;
+  qty1s?: number;
+  trades5s?: number;
+  qty5s?: number;
+  takerBias60s?: number | null;
+  levels?: { bids?: number; asks?: number };
+  trusted?: boolean;
+  seq?: number;
+}
+
+/** `edgePp = (p_yes - implied_mid) * 100`; `reference` is APPROXIMATION. */
+export interface K15mFairValueView {
+  reference?: string;
+  spot?: number | null;
+  sigma?: number | null;
+  pYes?: number | null;
+  impliedMid?: number | null;
+  edgePp?: number | null;
+  reason?: string | null;
+  approx?: string | null;
+  sigmaImplied?: number | null;
+  sigmaWindowSec?: number | null;
+  sigmaRealized?: number | null;
+  sigmaSource?: string | null;
+}
+
+export interface K15mCounters {
+  discovers?: number;
+  discoverErrors?: number;
+  rollOvers?: number;
+  samples?: number;
+  trades?: number;
+  duplicateTrades?: number;
+  seqGaps?: number;
+  snapshotRecoveries?: number;
+  restRecoveries?: number;
+}
+
+export interface K15mStrategyCounts {
+  [strategy: string]: { evaluated?: number; traded?: number } | undefined;
+}
+
+/** status.shadowStrategies = { mode, enabled: {A..F}, shadowStrategies: {...} } */
+export interface K15mShadowView {
+  mode?: string;
+  enabled?: Record<string, boolean>;
+  shadowStrategies?: K15mStrategyCounts;
+}
+
+export interface K15mPaperConfig {
+  enabled?: boolean;
+  bankrollCents?: number;
+  riskPerTradePct?: number;
+  dailyLossCapPct?: number;
+  maxExposurePct?: number;
+  maxPositionsPerMarket?: number;
+  minNetPp?: number;
+  holdSec?: number;
+  stopLossPp?: number;
+  takeProfitPp?: number;
+  reentryCooldownMs?: number;
+  allowPartial?: boolean;
+  maxBookAgeMs?: number;
+  killSwitch?: boolean;
+  haltStaleMs?: number;
+}
+
+export interface K15mStatusResponse {
+  enabled?: boolean;
+  series?: string;
+  authenticated?: boolean;
+  note?: string;
+  lastError?: string | null;
+  socket?: K15mSocketView;
+  window?: K15mWindowView;
+  book?: K15mBookView;
+  fairValue?: K15mFairValueView;
+  counters?: K15mCounters;
+  cadence?: { sampleMs?: number; discoverMs?: number; healthMs?: number; staleMs?: number };
+  strategyA?: { enabled?: boolean; mode?: string; evaluated?: number; traded?: number; skipped?: number; lastVerdict?: string | null };
+  shadowStrategies?: K15mShadowView;
+  sigmaPolicy?: { source?: string; impliedWindowSamples?: number; impliedRing?: number };
+  paper?: { enabled?: boolean; equityCents?: number; halt?: { manual?: boolean; auto?: boolean; reason?: string | null; halts?: number } };
+  counts?: Record<string, number>;
+}
+
+export interface K15mCalibrationResponse {
+  enabled?: boolean;
+  note?: string;
+  window?: { rows?: number; limit?: number };
+  config?: { sigmaSource?: string; impliedWindowSamples?: number; impliedRing?: number };
+  sigma?: {
+    realizedMedian?: number | null;
+    impliedMedian?: number | null;
+    impliedOverRealizedMedian?: number | null;
+    pairedSamples?: number;
+  };
+  edge?: { medianPp?: number | null; p95AbsPp?: number | null; shareOver2Pp?: number | null };
+  sources?: Record<string, number>;
+}
+
+export interface K15mSignalRow {
+  id: number;
+  ts: number;
+  market_ticker?: string;
+  event_ticker?: string;
+  strategy?: string;
+  verdict?: string;
+  side?: string | null;
+  expected_move_pp?: number | null;
+  repriced_pp?: number | null;
+  remaining_pp?: number | null;
+  cost_pp?: number | null;
+  net_pp?: number | null;
+  tau_sec?: number | null;
+  strike?: number | null;
+  sigma?: number | null;
+  spot_now?: number | null;
+  mid_now?: number | null;
+  move_bps?: number | null;
+  agree?: number | null;
+  skip_reason?: string | null;
+  reasons?: string | null;
+  phase?: string | null;
+}
+
+export interface K15mSignalsResponse {
+  enabled?: boolean;
+  count?: number;
+  mode?: string;
+  strategyAEnabled?: boolean;
+  summary?: {
+    window?: { rows?: number; limit?: number };
+    trades?: number;
+    skips?: number;
+    bySide?: Record<string, number>;
+    bySkipReason?: Record<string, number>;
+    byStrategy?: Record<string, { trades?: number; skips?: number }> | undefined;
+    tradeNetPpMedian?: number | null;
+    note?: string;
+  };
+  signals?: K15mSignalRow[];
+}
+
+/** All money fields are CENTS (or cent-fractions): render money(cents / 100). */
+export interface K15mPaperResponse {
+  ok?: boolean;
+  enabled?: boolean;
+  mode?: string;
+  config?: K15mPaperConfig;
+  halt?: { manual?: boolean; auto?: boolean; reason?: string | null; halts?: number };
+  equityCents?: number;
+  open?: Array<{
+    id?: number;
+    eventTicker?: string;
+    marketTicker?: string;
+    strategy?: string;
+    side?: string;
+    qty?: number;
+    entryPrice?: number;
+    entryFeeC?: number;
+    entryTs?: number;
+  }>;
+  risk?: { openCostC?: number; openPositions?: number; dailyRealizedC?: number; blockedBy?: string | null };
+  closed?: {
+    trades?: number;
+    wins?: number;
+    winRatePct?: number | null;
+    netCents?: number;
+    feesCents?: number;
+    byExitReason?: Array<{ r: string; n: number }>;
+  };
+  counters?: { entries?: number; rejected?: number; exits?: number; settled?: number; halts?: number };
+  rejects?: Record<string, number>;
+  byStrategy?: Array<{ strategy: string; trades?: number; net_c?: number }>;
+}
+
+export const getK15mStatus = (): Promise<K15mStatusResponse> => get<K15mStatusResponse>('/kalshi15m');
+
+export const getK15mCalibration = (limit = 2_000): Promise<K15mCalibrationResponse> =>
+  get<K15mCalibrationResponse>(`/kalshi15m/calibration?limit=${limit}`);
+
+export const getK15mSignals = (
+  params: { limit?: number; summaryLimit?: number; strategy?: string } = {},
+): Promise<K15mSignalsResponse> => {
+  const q = new URLSearchParams();
+  if (params.limit !== undefined) q.set('limit', String(params.limit));
+  if (params.summaryLimit !== undefined) q.set('summary_limit', String(params.summaryLimit));
+  if (params.strategy) q.set('strategy', params.strategy);
+  const qs = q.toString();
+  return get<K15mSignalsResponse>(`/kalshi15m/signals${qs ? `?${qs}` : ''}`);
+};
+
+export const getK15mPaper = (): Promise<K15mPaperResponse> => get<K15mPaperResponse>('/kalshi15m/paper');
+
+/** Emergency control on the paper ledger: halt blocks every entry now. */
+export const getK15mPaperAction = (action: 'halt' | 'resume'): Promise<K15mPaperResponse> =>
+  get<K15mPaperResponse>(`/kalshi15m/paper?action=${action}`);

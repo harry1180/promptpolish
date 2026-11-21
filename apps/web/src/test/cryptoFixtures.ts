@@ -418,7 +418,160 @@ export const ACCURACY = {
   detail: [],
 };
 
-/** endpoint key ('status', 'overview', 'experiments', …) -> payload */
+/* ------------------------------------------------------------------ */
+/* Kalshi 15m engine — /kalshi15m{,/calibration,/signals,/paper}       */
+/* mirrors server/src/crypto/routes.ts; money arrives in CENTS        */
+/* ------------------------------------------------------------------ */
+
+export const KALSHI15M = {
+  enabled: true,
+  series: 'KXBTC15M',
+  authenticated: true,
+  socket: { live: true, connects: 1, reconnects: 0, errors: 0, lastError: null, framesSeen: 92_680, lastFrameAt: T0, stalenessMs: 4, stale: false },
+  window: {
+    eventTicker: 'KXBTC15M-20NOV202100',
+    marketTicker: 'KXBTC15M-20NOV202100-00',
+    openTs: T0 - 600_000,
+    closeTs: T0 + 300_000,
+    expireTs: T0 + 600_000,
+    strike: 76_640.5,
+    phase: 'OPEN',
+    msToClose: 240_000,
+    source: 'REST',
+  },
+  book: {
+    bestBid: 0.52, bestAsk: 0.53, spread: 0.01, imbalance: 0.11, ofi: 0.04, cancelRatio: 0.42,
+    deltasInWindow: 612, trades1s: 4, qty1s: 12.5, trades5s: 31, qty5s: 180.2, takerBias60s: 0.18,
+    levels: { bids: 128, asks: 141 }, trusted: true, seq: 291_819,
+  },
+  fairValue: {
+    reference: 'APPROXIMATION', spot: 76_641.2, sigma: 0.000052, pYes: 0.5473, impliedMid: 0.525,
+    edgePp: 2.23, reason: null, approx: 'coinbase', sigmaImplied: 0.000081, sigmaWindowSec: 60,
+    sigmaRealized: 0.0000069, sigmaSource: 'max/implied',
+  },
+  counters: {
+    discovers: 12, discoverErrors: 0, rollOvers: 0, samples: 812, trades: 24_118,
+    duplicateTrades: 0, seqGaps: 0, snapshotRecoveries: 0, restRecoveries: 0,
+  },
+  cadence: { sampleMs: 250, discoverMs: 10_000, healthMs: 60_000, staleMs: 5_000 },
+  strategyA: { enabled: true, mode: 'SHADOW', evaluated: 257, traded: 0, skipped: 257, lastVerdict: 'SKIP', lastNetPp: null },
+  shadowStrategies: {
+    mode: 'SHADOW',
+    enabled: { A: true, B: true, C: true, D: true, E: true, F: true },
+    shadowStrategies: {
+      A_LEADLAG: { evaluated: 257, traded: 0 },
+      B_MICRO: { evaluated: 257, traded: 0 },
+      C_PANICFADE: { evaluated: 257, traded: 7 },
+      D_MOMENTUM: { evaluated: 257, traded: 3 },
+      E_LATEFAV_HOLD: { evaluated: 257, traded: 0 },
+      F_MAKER: { evaluated: 257, traded: 168 },
+    },
+  },
+  sigmaPolicy: { source: 'max', impliedWindowSamples: 240, impliedRing: 240 },
+  paper: { enabled: true, equityCents: 99_438.36, halt: { manual: false, auto: false, reason: null, halts: 1 } },
+};
+
+export const KALSHI15M_CALIBRATION = {
+  window: { rows: 2_000, limit: 2_000 },
+  config: { sigmaSource: 'max', impliedWindowSamples: 240, impliedRing: 240 },
+  sigma: { realizedMedian: 0.00000695, impliedMedian: 0.000000603, impliedOverRealizedMedian: 0.0876, pairedSamples: 1_240 },
+  edge: { medianPp: 1.87, p95AbsPp: 10.37, shareOver2Pp: 0.3333 },
+  sources: { 'max/implied': 2_000 },
+  note: 'edge_pp is information ONLY while sigma is calibrated: compare impliedOverRealizedMedian with 1 before believing any edge.',
+};
+
+export const KALSHI15M_SIGNALS = {
+  enabled: true,
+  count: 3,
+  mode: 'SHADOW — no order is ever placed from this engine',
+  strategyAEnabled: true,
+  summary: {
+    window: { rows: 2_000, limit: 2_000 },
+    trades: 190,
+    skips: 1_810,
+    bySide: { YES: 37, NO: 153 },
+    bySkipReason: {
+      move_too_small: 584,
+      edge_below_cost: 248,
+      no_panic_drop: 236,
+      not_late_enough: 211,
+      not_a_favorite: 115,
+      imbalance_too_weak: 81,
+      taker_flow_disagreement: 78,
+      spot_confirms_move: 44,
+      flow_disagreement: 39,
+      venue_disagreement: 31,
+      ofi_disagreement: 63,
+      ofi_too_weak: 26,
+      no_model_probability: 20,
+      no_model_inputs: 12,
+      no_sigma: 12,
+      no_mid_history: 8,
+      no_spot_history: 2,
+    },
+    tradeNetPpMedian: 4.9978,
+    note: 'SHADOW ONLY: no order was ever placed; verdicts are hypothetical.',
+  },
+  signals: [
+    {
+      id: 21_395, ts: T0, market_ticker: 'KXBTC15M-20NOV202100-00', event_ticker: 'KXBTC15M-20NOV202100',
+      strategy: 'F_MAKER', verdict: 'SKIP', side: null, expected_move_pp: null, repriced_pp: null,
+      remaining_pp: null, cost_pp: 0, net_pp: null, tau_sec: 48.6, strike: 76_640.5, sigma: 0.000052,
+      spot_now: 76_641.2, mid_now: 0.525, move_bps: null, agree: 1, skip_reason: 'move_too_small',
+      reasons: 'tau=48.6s maker_fee=0 (series fee_type=quadratic); spot move below the 1.5bps floor',
+      phase: 'OPEN',
+    },
+    {
+      id: 21_394, ts: T0 - 250, market_ticker: 'KXBTC15M-20NOV202100-00', event_ticker: 'KXBTC15M-20NOV202100',
+      strategy: 'C_PANICFADE', verdict: 'TRADE', side: 'NO', expected_move_pp: 6.1, repriced_pp: 3.7,
+      remaining_pp: 2.4, cost_pp: 1.6, net_pp: 2.4, tau_sec: 132.4, strike: 76_640.5, sigma: 0.000052,
+      spot_now: 76_641.2, mid_now: 0.525, move_bps: 4.2, agree: 1, skip_reason: null,
+      reasons: 'drop not confirmed by spot tape; rebound fraction 0.5 (stated assumption)',
+      phase: 'OPEN',
+    },
+    {
+      id: 21_393, ts: T0 - 500, market_ticker: 'KXBTC15M-20NOV202100-00', event_ticker: 'KXBTC15M-20NOV202100',
+      strategy: 'A_LEADLAG', verdict: 'SKIP', side: null, expected_move_pp: 3.4, repriced_pp: 1.1,
+      remaining_pp: 2.3, cost_pp: 1.6, net_pp: 1.1, tau_sec: 96.2, strike: 76_640.5, sigma: 0.000052,
+      spot_now: 76_641.2, mid_now: 0.525, move_bps: 2.9, agree: 1, skip_reason: 'edge_below_cost',
+      reasons: 'expected 3.4pp move vs 1.1pp already repriced; round trip cost 1.6pp',
+      phase: 'OPEN',
+    },
+  ],
+};
+
+export const KALSHI15M_PAPER = {
+  ok: true,
+  mode: 'PAPER — simulated fills, no order path exists in this engine',
+  enabled: true,
+  config: {
+    enabled: true, bankrollCents: 100_000, riskPerTradePct: 0.25, dailyLossCapPct: 2, maxExposurePct: 5,
+    maxPositionsPerMarket: 1, minNetPp: 2, holdSec: 10, stopLossPp: 5, takeProfitPp: 10,
+    reentryCooldownMs: 5_000, allowPartial: false, maxBookAgeMs: 5_000, killSwitch: false, haltStaleMs: 30_000,
+  },
+  halt: { manual: false, auto: false, reason: null, halts: 1 },
+  equityCents: 99_438.36,
+  open: [
+    {
+      id: 50, eventTicker: 'KXBTC15M-20NOV202100', marketTicker: 'KXBTC15M-20NOV202100-00',
+      strategy: 'F_MAKER', side: 'NO', qty: 2, entryPrice: 0.47, entryFeeC: 0, entryTs: T0 - 40_000,
+    },
+  ],
+  risk: { openCostC: 94, openPositions: 1, dailyRealizedC: -561.64, blockedBy: null },
+  closed: {
+    trades: 48, wins: 15, winRatePct: 31.3, netCents: -561.64, feesCents: 763.64,
+    byExitReason: [{ r: 'TIME_EXIT', n: 28 }, { r: 'STOP_LOSS', n: 16 }, { r: 'TAKE_PROFIT', n: 4 }],
+  },
+  counters: { entries: 21, rejected: 154, exits: 22, settled: 0, halts: 1 },
+  rejects: { risk_reentry_cooldown: 73, risk_position_exists: 79, risk_insufficient_depth: 1, risk_exit_insufficient_depth: 1 },
+  byStrategy: [
+    { strategy: 'F_MAKER', trades: 46, net_c: -577.6 },
+    { strategy: 'C_PANICFADE', trades: 1, net_c: -52.15 },
+    { strategy: 'A_LEADLAG', trades: 1, net_c: 68.11 },
+  ],
+};
+
+/** top-K ranking shadow record — /shadow */
 export const SHADOW = {
   enabled: true,
   k: 3,
@@ -437,6 +590,7 @@ export const SHADOW = {
   ],
 };
 
+/** endpoint key ('status', 'overview', 'kalshi15m', …) -> payload */
 export const FIXTURES: Record<string, unknown> = {
   status: STATUS,
   overview: OVERVIEW,
@@ -462,6 +616,11 @@ export const FIXTURES: Record<string, unknown> = {
   providers_stale: PROVIDERS_STALE,
   xchange_disabled: XCHANGE_DISABLED,
   context_enabled: CONTEXT_ON,
+  /* Kalshi 15m engine (read-only) */
+  kalshi15m: KALSHI15M,
+  'kalshi15m/calibration': KALSHI15M_CALIBRATION,
+  'kalshi15m/signals': KALSHI15M_SIGNALS,
+  'kalshi15m/paper': KALSHI15M_PAPER,
 };
 
 /**

@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe('Crypto shell', () => {
-  it('always shows the paper + 24/7 badges and all 6 nav labels, in order', async () => {
+  it('always shows the paper + 24/7 badges and all 7 nav labels, in order', async () => {
     render(<Crypto />);
 
     // both badges live in the shell header — always visible on every page
@@ -30,7 +30,7 @@ describe('Crypto shell', () => {
     const nav = await screen.findByRole('navigation', { name: /crypto navigation/i });
     const links = within(nav).getAllByRole('link').map((a) => a.textContent ?? '');
     expect(links).toEqual(NAV.map((n) => n.label));
-    expect(links).toEqual(['Overview', 'Market', 'Signals', 'Paper Trading', 'Learning', 'System']);
+    expect(links).toEqual(['Overview', 'Market', 'Kalshi 15m', 'Signals', 'Paper Trading', 'Learning', 'System']);
   });
 
   it('renders the Overview page with provider, transport and universe in the header', async () => {
