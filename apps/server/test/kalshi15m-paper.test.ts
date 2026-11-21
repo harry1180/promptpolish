@@ -182,3 +182,37 @@ test('summary reports every number the dashboard and audit need', () => {
   assert.ok((e.riskState().openPositions === 0));
   ensurePaperTables(db); // idempotent — safe on a live database
 });
+
+test('kill switch + feed supervision: entries halt, report themselves, and recover', () => {
+  // operator kill switch from env: halted from birth, every entry refused
+  const e1 = new PaperEngine(new DatabaseSync(':memory:'), cfg({ killSwitch: true }));
+  assert.equal(e1.halted, true, 'kill switch engages at construction');
+  assert.equal(e1.enter(sig(), EV, MKT, book(), T0).reason, 'halted_manual');
+  assert.equal(e1.counters.entries, 0, 'nothing slipped through while halted');
+  const h1 = e1.summary().halt as { manual: boolean; halts: number };
+  assert.equal(h1.manual, true);
+  assert.ok(h1.halts >= 1, 'the halt is on the record');
+  e1.resume();
+  assert.equal(e1.enter(sig(), EV, MKT, book(), T0).action, 'ENTER', 'resume works');
+
+  // automatic halt: a silent feed stops entries, frames returning clears it
+  const e2 = new PaperEngine(new DatabaseSync(':memory:'), cfg());
+  e2.setFeedOk(false, 'feed_stale');
+  assert.equal(e2.halted, true);
+  assert.equal(e2.enter(sig(), EV, MKT, book(), T0).reason, 'halted_feed_stale');
+  assert.equal((e2.summary().halt as { reason: string | null }).reason, 'feed_stale');
+  e2.setFeedOk(true);
+  assert.equal(e2.halted, false, 'fresh frames lift the automatic halt');
+  assert.equal(e2.enter(sig(), EV, MKT, book(), T0).action, 'ENTER');
+
+  // manual halt is sticky: feed recovery cannot clear an operator stop
+  e2.halt();
+  e2.setFeedOk(true);
+  assert.equal(e2.enter(sig(), 'E3', MKT, book(), T0 + 60_000).reason, 'halted_manual');
+  const h2 = e2.haltState();
+  assert.equal(h2.manual, true);
+  assert.equal(h2.auto, false, 'the two halt sources stay distinguishable');
+  assert.ok(h2.halts >= 2, 'each distinct halt was counted');
+  e2.resume();
+  assert.equal(e2.halted, false);
+});

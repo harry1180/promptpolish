@@ -38,6 +38,10 @@ export interface PaperConfig {
   allowPartial: boolean;
   /** reject when the decision book is older than this (ms) */
   maxBookAgeMs: number;
+  /** EMERGENCY: start halted (KALSHI15M_KILL_SWITCH=1) — no entries at all */
+  killSwitch: boolean;
+  /** feed silent this long -> automatic halt until frames return (ms) */
+  haltStaleMs: number;
 }
 
 export function paperConfigFromEnv(env: Record<string, string | undefined> = process.env): PaperConfig {
@@ -60,6 +64,8 @@ export function paperConfigFromEnv(env: Record<string, string | undefined> = pro
     reentryCooldownMs: num(env.KALSHI15M_PAPER_COOLDOWN_MS, 5_000),
     allowPartial: env.KALSHI15M_PAPER_ALLOW_PARTIAL === '1',
     maxBookAgeMs: num(env.KALSHI15M_PAPER_MAX_BOOK_AGE_MS, 5_000),
+    killSwitch: env.KALSHI15M_KILL_SWITCH === '1' || env.KALSHI15M_KILL_SWITCH === 'true',
+    haltStaleMs: num(env.KALSHI15M_PAPER_HALT_STALE_MS, 30_000),
   };
 }
 
@@ -145,13 +151,43 @@ export interface RiskState {
 export class PaperEngine {
   readonly cfg: PaperConfig;
   private readonly db: DatabaseSync;
-  readonly counters = { entries: 0, rejected: 0, exits: 0, settled: 0 };
+  readonly counters = { entries: 0, rejected: 0, exits: 0, settled: 0, halts: 0 };
   readonly rejects: Record<string, number> = {};
+  /** manual: kill switch / operator. Auto: feed or data failure. Both block entries. */
+  private manualHalt = false;
+  private autoHaltReason: string | null = null;
 
   constructor(db: DatabaseSync, cfg: PaperConfig) {
     this.db = db;
     this.cfg = cfg;
+    this.manualHalt = cfg.killSwitch;
+    if (cfg.killSwitch) this.counters.halts += 1;
     ensurePaperTables(db);
+  }
+
+  /* ---------------- kill switch / automatic halts ---------------- */
+
+  get halted(): boolean { return this.manualHalt || this.autoHaltReason !== null; }
+
+  halt(): void { // operator emergency stop — persists until resume()
+    if (!this.manualHalt) this.counters.halts += 1;
+    this.manualHalt = true;
+  }
+
+  resume(): void { this.manualHalt = false; }
+
+  /** Feed supervision: silent feed halts entries; frames returning clears it. */
+  setFeedOk(ok: boolean, reason = 'feed_stale'): void {
+    const next = ok ? null : reason;
+    if (next !== this.autoHaltReason && next !== null) this.counters.halts += 1;
+    this.autoHaltReason = next;
+  }
+
+  haltState(): { manual: boolean; auto: boolean; reason: string | null; halts: number } {
+    return {
+      manual: this.manualHalt, auto: this.autoHaltReason !== null,
+      reason: this.autoHaltReason, halts: this.counters.halts,
+    };
   }
 
   /* ---------------- state ---------------- */
@@ -225,6 +261,8 @@ export class PaperEngine {
   enter(v: StrategyVerdict, eventTicker: string, marketTicker: string, book: PaperBookView, now: number): PaperDecision {
     if (!this.cfg.enabled) return { action: 'NONE', reason: 'paper_disabled' };
     if (v.verdict !== 'TRADE') return { action: 'NONE', reason: 'no_signal' };
+    if (this.manualHalt) return this.reject('halted_manual');   // kill switch first
+    if (this.autoHaltReason) return this.reject(`halted_${this.autoHaltReason}`);
     const side = (v.side ?? 'YES') as 'YES' | 'NO';
 
     // --- VALIDATE: risk gates, in order, each refusal named ---
@@ -355,6 +393,7 @@ export class PaperEngine {
     return {
       enabled: this.cfg.enabled,
       config: this.cfg,
+      halt: this.haltState(),
       equityCents: this.equityCents(),
       open: this.openPositions(),
       risk,

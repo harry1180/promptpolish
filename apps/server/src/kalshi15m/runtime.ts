@@ -315,7 +315,15 @@ export class K15mRuntime {
     if (now - this.lastOutcomeAt >= this.config.outcomeMs) {
       void this.collectOutcomes(now);
     }
-    if (this.config.paper.enabled) this.runPaperManage(now, book);
+    if (this.config.paper.enabled) {
+      // Phase 11: a silent feed HALTS paper entries automatically (frames
+      // returning clear it); a frame can stop while the book still answers,
+      // so freshness is measured from the last book frame, not from the book.
+      const silent = this.stats.lastFrameAt === 0
+        || now - this.stats.lastFrameAt > this.config.paper.haltStaleMs;
+      this.paper.setFeedOk(!silent, 'feed_stale');
+      this.runPaperManage(now, book);
+    }
     if (now - this.lastPruneAt >= 3_600_000) {
       this.lastPruneAt = now;
       pruneK15m(this.db, this.config.retentionDays, now);

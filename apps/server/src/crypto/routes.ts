@@ -470,6 +470,12 @@ export async function handleCrypto(
       }
       if (rest[1] === 'paper') {
         if (!k) return done({ status: 200, body: { enabled: false } });
+        // emergency control: ?action=halt stops ALL paper entries now,
+        // ?action=resume clears the manual kill switch (auto halts stay until
+        // the feed returns). Kept on GET because the console session-auths it.
+        const action = url.searchParams.get('action');
+        if (action === 'halt') k.paper.halt();
+        if (action === 'resume') k.paper.resume();
         return done({
           status: 200,
           body: {
