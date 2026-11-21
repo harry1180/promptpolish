@@ -200,6 +200,8 @@ export class K15mRuntime {
   private lastOutcomeAt = 0;
   /** local arrival time of the newest book frame — the paper staleness gate */
   private lastBookFrameAt = 0;
+  /** newest trade print on the current market (YES $) — maker fill trigger */
+  private lastPrint: { price: number; ts: number } | null = null;
   /** paper execution: built always (tables ready), actives only when enabled */
   readonly paper: PaperEngine;
   readonly stratAStats = { evaluated: 0, traded: 0, skipped: 0, lastVerdict: null as string | null, lastNetPp: null as number | null };
@@ -476,8 +478,10 @@ export class K15mRuntime {
       takerSide: print.takerSide, takerBookSide: print.takerBookSide,
       seq: typeof frame.seq === 'number' ? frame.seq : null,
     }, this.now());
-    if (inserted) this.stats.trades += 1;
-    else this.stats.duplicateTrades += 1;
+    if (inserted) {
+      this.stats.trades += 1;
+      this.lastPrint = { price: print.yesPrice, ts: this.now() };
+    } else this.stats.duplicateTrades += 1;
     const book = this.books.get(ticker);
     if (book && inserted) book.addTrade(print, this.now());
   }
@@ -725,11 +729,14 @@ export class K15mRuntime {
     };
   }
 
-  /** MANAGE: every open paper position against the live book, each tick. */
+  /**
+   * One paper pass each tick: progress resting (maker) orders against the
+   * newest print, then manage every open position against the live book.
+   */
   private runPaperManage(now: number, book: KalshiBook | undefined): void {
     const pb = this.paperBook(now, book);
     if (!pb) return;
-    for (const pos of this.paper.openPositions()) this.paper.manage(pos, pb, now);
+    this.paper.onTick(now, pb, this.lastPrint);
   }
 
   /* ---------------------------------------------------------------- */

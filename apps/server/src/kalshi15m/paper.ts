@@ -42,6 +42,12 @@ export interface PaperConfig {
   killSwitch: boolean;
   /** feed silent this long -> automatic halt until frames return (ms) */
   haltStaleMs: number;
+  /** strategies that place PASSIVE bids (fee-free) instead of crossing the book */
+  makerStrategies: string[];
+  /** a resting bid unfilled within this window is cancelled (ms) */
+  makerFillTimeoutMs: number;
+  /** resting take-profit offset above a maker entry (pp) */
+  makerTakeProfitPp: number;
 }
 
 export function paperConfigFromEnv(env: Record<string, string | undefined> = process.env): PaperConfig {
@@ -66,6 +72,13 @@ export function paperConfigFromEnv(env: Record<string, string | undefined> = pro
     maxBookAgeMs: num(env.KALSHI15M_PAPER_MAX_BOOK_AGE_MS, 5_000),
     killSwitch: env.KALSHI15M_KILL_SWITCH === '1' || env.KALSHI15M_KILL_SWITCH === 'true',
     haltStaleMs: num(env.KALSHI15M_PAPER_HALT_STALE_MS, 30_000),
+    // F's edge is computed fee-free at the BID: charging it taker economics
+    // made every trade structurally negative (measured: avg fees 15.6c vs an
+    // average move of -0.46pp). Maker strategies therefore place resting bids.
+    makerStrategies: (env.KALSHI15M_PAPER_MAKER_STRATS ?? 'F_MAKER')
+      .split(',').map((s) => s.trim()).filter(Boolean),
+    makerFillTimeoutMs: num(env.KALSHI15M_PAPER_MAKER_FILL_MS, 10_000),
+    makerTakeProfitPp: num(env.KALSHI15M_PAPER_MAKER_TP_PP, 2),
   };
 }
 
@@ -92,6 +105,18 @@ export interface OpenPosition {
   entryTs: number;
   phase: PaperPhase;
   signalNetPp: number | null;
+}
+
+/** A passive order waiting for the market to come to it (maker execution). */
+export interface RestingOrder {
+  eventTicker: string;
+  marketTicker: string;
+  strategy: string;
+  side: 'YES' | 'NO';
+  /** resting price in this side's own dollars */
+  price: number;
+  ts: number;
+  netPp: number | null;
 }
 
 export interface PaperDecision {
@@ -151,7 +176,13 @@ export interface RiskState {
 export class PaperEngine {
   readonly cfg: PaperConfig;
   private readonly db: DatabaseSync;
-  readonly counters = { entries: 0, rejected: 0, exits: 0, settled: 0, halts: 0 };
+  readonly counters = {
+    entries: 0, rejected: 0, exits: 0, settled: 0, halts: 0,
+    resting: 0, makerFills: 0, makerCancels: 0,
+  };
+  /** resting (maker) orders awaiting a fill — in memory: lost on restart */
+  private readonly restingOrders = new Map<string, RestingOrder>();
+  private lastPrint: { price: number; ts: number } | null = null;
   readonly rejects: Record<string, number> = {};
   /** manual: kill switch / operator. Auto: feed or data failure. Both block entries. */
   private manualHalt = false;
@@ -163,6 +194,16 @@ export class PaperEngine {
     this.manualHalt = cfg.killSwitch;
     if (cfg.killSwitch) this.counters.halts += 1;
     ensurePaperTables(db);
+  }
+
+  /** maker strategies place passive orders; everyone else crosses the book */
+  isMaker(strategy: string): boolean {
+    return this.cfg.makerStrategies.includes(strategy);
+  }
+
+  /** snapshot of the live resting orders (for status/tests) */
+  restingList(): RestingOrder[] {
+    return [...this.restingOrders.values()];
   }
 
   /* ---------------- kill switch / automatic halts ---------------- */
@@ -280,6 +321,28 @@ export class PaperEngine {
     }
     if (book.ageMs > this.cfg.maxBookAgeMs) return this.reject('data_stale_book');
 
+    // --- MAKER path: place a PASSIVE bid at the touch (never cross, no fee).
+    // The order waits for the market: it fills only when price trades through
+    // it, and is cancelled if it does not within makerFillTimeoutMs. Size is
+    // decided AT FILL (risk budget), not from the signal's quote.
+    if (this.isMaker(v.strategy)) {
+      if (this.restingOrders.has(eventTicker)) return this.reject('risk_position_exists');
+      const price = side === 'YES' ? book.yesBid : 1 - book.yesAsk;
+      if (price === null || !(price > 0) || !(price < 1)) return this.reject('data_no_executable_book');
+      const depthDollars = side === 'YES' ? book.depthBidDollars : book.depthAskDollars;
+      if (typeof depthDollars === 'number' && depthDollars > 0 && depthDollars / price < 1) {
+        return this.reject('risk_insufficient_depth');
+      }
+      this.restingOrders.set(eventTicker, {
+        eventTicker, marketTicker, strategy: v.strategy, side, price, ts: now, netPp: v.netPp ?? null,
+      });
+      this.counters.resting += 1;
+      return {
+        action: 'ENTER', reason: 'resting_bid_placed',
+        fill: { qty: 0, price, feeC: 0 },
+      };
+    }
+
     // --- sizing: fixed fraction of bankroll, capped by exposure and depth ---
     const entryPrice = side === 'YES' ? book.yesAsk : 1 - book.yesBid;
     const feePerContract = takerFee(1, entryPrice, KXBTC15M_FEES).perContract;
@@ -314,6 +377,129 @@ export class PaperEngine {
       position: pos,
       fill: { qty, price: entryPrice, feeC },
     };
+  }
+
+  /* ---------------- MAKER: resting orders -> fills -> exits ---------- */
+
+  /**
+   * One paper pass: progress resting orders, then manage open positions.
+   * `print` is the newest trade print (YES dollars) — a resting order fills
+   * only when the market actually TRADED through its price (print or touch),
+   * never on a mid move alone.
+   */
+  onTick(now: number, book: PaperBookView, print?: { price: number; ts: number } | null): PaperDecision[] {
+    if (print && Number.isFinite(print.price)) this.lastPrint = print;
+    const out: PaperDecision[] = [];
+    if (!this.cfg.enabled) return out;
+    for (const o of [...this.restingOrders.values()]) {
+      const d = this.progressResting(o, book, now);
+      if (d.action !== 'NONE') out.push(d);
+    }
+    for (const pos of this.openPositions()) {
+      const d = this.isMaker(pos.strategy)
+        ? this.manageMaker(pos, book, now)
+        : this.manage(pos, book, now);
+      if (d.action !== 'NONE') out.push(d);
+    }
+    return out;
+  }
+
+  /** Did price trade through this resting order? (side-mapped into YES terms) */
+  private touched(o: RestingOrder, book: PaperBookView, now: number): boolean {
+    const fresh = this.lastPrint !== null && now - this.lastPrint.ts <= 1_000;
+    const px = this.lastPrint?.price ?? null;
+    if (o.side === 'YES') {
+      const level = o.price; // resting YES bid
+      if (fresh && px !== null && px <= level + 1e-9) return true;
+      return book.yesAsk !== null && book.yesAsk <= level + 1e-9;
+    }
+    const level = 1 - o.price; // NO bid <=> resting YES ask at `level`
+    if (fresh && px !== null && px >= level - 1e-9) return true;
+    return book.yesBid !== null && book.yesBid >= level - 1e-9;
+  }
+
+  private progressResting(o: RestingOrder, book: PaperBookView, now: number): PaperDecision {
+    if (now - o.ts > this.cfg.makerFillTimeoutMs) {
+      this.restingOrders.delete(o.eventTicker);
+      this.counters.makerCancels += 1;
+      const k = 'maker_fill_timeout';
+      this.rejects[k] = (this.rejects[k] ?? 0) + 1;
+      return { action: 'NONE', reason: k };
+    }
+    if (book.ageMs > this.cfg.maxBookAgeMs) return { action: 'NONE', reason: 'data_stale_book' };
+    if (!this.touched(o, book, now)) return { action: 'NONE', reason: 'resting_unfilled' };
+
+    const price = o.price;
+    const risk = this.riskState();
+    const budget = (this.cfg.bankrollCents * this.cfg.riskPerTradePct) / 100;
+    const headroomC = (this.cfg.bankrollCents * this.cfg.maxExposurePct) / 100 - risk.openCostC;
+    let qty = Math.min(
+      Math.floor(budget / cents(price)),
+      Math.floor(headroomC / cents(price)),
+    );
+    if (qty <= 0) {
+      this.restingOrders.delete(o.eventTicker);
+      return this.reject('risk_exposure_cap');
+    }
+    // depth at the touch still caps size (the resting quote IS the top level)
+    const depthDollars = o.side === 'YES' ? book.depthBidDollars : book.depthAskDollars;
+    const atTouch = o.side === 'YES' ? book.yesBid === price : book.yesAsk === 1 - price;
+    if (atTouch && typeof depthDollars === 'number' && depthDollars > 0) {
+      const depthQty = Math.floor(depthDollars / price);
+      if (depthQty < qty) {
+        if (!this.cfg.allowPartial) {
+          this.restingOrders.delete(o.eventTicker);
+          return this.reject('risk_insufficient_depth');
+        }
+        qty = depthQty;
+      }
+    }
+    if (qty <= 0) {
+      this.restingOrders.delete(o.eventTicker);
+      return this.reject('risk_size_zero');
+    }
+
+    const res = this.db.prepare(
+      `INSERT INTO k15m_paper_trades (event_ticker, market_ticker, strategy, side, qty,
+         entry_price, entry_fee_c, entry_ts, phase, net_pp_predicted, status, updated_ts)
+       VALUES (?,?,?,?,?,?,0,?, 'CONFIRM_FILL', ?, 'OPEN', ?)`,
+    ).run(o.eventTicker, o.marketTicker, o.strategy, o.side, qty, price, o.ts, o.netPp, now);
+    this.restingOrders.delete(o.eventTicker);
+    this.counters.makerFills += 1;
+    this.counters.entries += 1;
+    const pos = this.openPositions().find((x) => x.id === Number(res.lastInsertRowid));
+    return {
+      action: 'ENTER', reason: 'maker_fill_resting_price', position: pos,
+      fill: { qty, price, feeC: 0 },
+    };
+  }
+
+  /** Maker position: resting take-profit ask (fee-free), else stop/time exit. */
+  private manageMaker(pos: OpenPosition, book: PaperBookView, now: number): PaperDecision {
+    const bid = pos.side === 'YES' ? book.yesBid : 1 - (book.yesAsk ?? 1);
+    const ask = pos.side === 'YES' ? book.yesAsk : 1 - (book.yesBid ?? 1);
+    if (bid === null || ask === null || book.ageMs > this.cfg.maxBookAgeMs) {
+      return { action: 'NONE', reason: 'data_stale_book' };
+    }
+    const tp = pos.entryPrice + this.cfg.makerTakeProfitPp / 100;
+    const stop = pos.entryPrice - this.cfg.stopLossPp / 100;
+    const fresh = this.lastPrint !== null && now - this.lastPrint.ts <= 1_000;
+    const px = this.lastPrint?.price ?? null;
+
+    // resting TP quote: YES ask at tp (fills when YES trades up to it),
+    // NO ask at tp <=> YES bid at 1-tp (fills when YES trades down to it)
+    const tpFill = pos.side === 'YES'
+      ? (bid >= tp - 1e-9 || (fresh && px !== null && px >= tp - 1e-9))
+      : (ask <= 1 - tp + 1e-9 || (fresh && px !== null && px <= 1 - tp + 1e-9));
+    if (tpFill) {
+      const pnlC = Math.round((tp - pos.entryPrice) * pos.qty * DOLLARS_TO_CENTS * 100) / 100;
+      this.close(pos, tp, 0, now, 'TAKE_PROFIT', pnlC); // maker exit: no fee
+      return { action: 'EXIT', reason: 'TAKE_PROFIT', position: pos, fill: { qty: pos.qty, price: tp, feeC: 0 }, pnlC };
+    }
+    // stop and time exits must CROSS the book -> taker fee, filled at the bid
+    if (bid <= stop + 1e-9) return this.exit(pos, bid, now, 'STOP_LOSS', book);
+    if (now - pos.entryTs >= this.cfg.holdSec * 1_000) return this.exit(pos, bid, now, 'TIME_EXIT', book);
+    return { action: 'NONE', reason: 'MANAGE' };
   }
 
   /* ---------------- MANAGE -> EXIT ---------------- */
@@ -396,6 +582,7 @@ export class PaperEngine {
       halt: this.haltState(),
       equityCents: this.equityCents(),
       open: this.openPositions(),
+      resting: this.restingList(),
       risk,
       closed: {
         trades: Number(closed.n),

@@ -216,3 +216,80 @@ test('kill switch + feed supervision: entries halt, report themselves, and recov
   e2.resume();
   assert.equal(e2.halted, false);
 });
+
+
+/* ------------------------------------------------------------------ */
+/* Maker execution (the fix for F): passive bids, fee-free fills        */
+/* ------------------------------------------------------------------ */
+
+test('maker strategy places a resting bid instead of crossing the book', () => {
+  const db = new DatabaseSync(':memory:');
+  const e = new PaperEngine(db, cfg());
+  const d = e.enter({ ...sig(), strategy: 'F_MAKER' }, EV, MKT, book(), T0);
+  assert.equal(d.reason, 'resting_bid_placed', 'F quotes, it does not lift');
+  assert.equal(d.fill?.price, 0.43, 'rests ON the touch (yes bid), never at the ask');
+  assert.equal(d.fill?.feeC, 0, 'maker entry costs nothing');
+  assert.equal(e.openPositions().length, 0, 'nothing is positioned until the market trades through');
+  assert.equal(e.restingList().length, 1);
+  assert.equal(e.counters.resting, 1);
+
+  // a print AWAY from our price does not fill us
+  e.onTick(T0 + 2_000, book(), { price: 0.46, ts: T0 + 2_000 });
+  assert.equal(e.restingList().length, 1, 'still resting');
+
+  // no trade-through within the window: cancel, never fake a fill
+  e.onTick(T0 + 11_000, book(), null);
+  assert.equal(e.restingList().length, 0);
+  assert.equal(e.counters.makerCancels, 1);
+  assert.equal(e.counters.entries, 0, 'an unfilled order is not a trade');
+  assert.equal((e.summary().rejects as Record<string, number>).maker_fill_timeout, 1);
+});
+
+test('maker fill at our resting price, then a fee-free take-profit exit', () => {
+  const db = new DatabaseSync(':memory:');
+  const e = new PaperEngine(db, cfg());
+  e.enter({ ...sig(), strategy: 'F_MAKER' }, EV, MKT, book(), T0);
+
+  // the market trades DOWN into our bid -> fill AT the bid, no fee
+  const fill = e.onTick(T0 + 2_000, book(), { price: 0.43, ts: T0 + 2_000 })[0];
+  assert.equal(fill.reason, 'maker_fill_resting_price');
+  assert.equal(fill.fill?.price, 0.43, 'filled at the resting price, not the ask');
+  assert.equal(fill.fill?.feeC, 0, 'maker entry: no fee — the fix for F');
+  const pos = e.openPositions()[0];
+  assert.ok(pos && pos.qty > 0);
+  assert.equal(e.restingList().length, 0, 'order consumed');
+  assert.equal(e.counters.makerFills, 1);
+
+  // price rises to entry + 2c: the resting ask fills fee-free
+  const tp = e.onTick(T0 + 5_000, book({ yesBid: 0.45, yesAsk: 0.46 }), null)[0];
+  assert.equal(tp.reason, 'TAKE_PROFIT');
+  assert.equal(tp.fill?.price, 0.45);
+  assert.equal(tp.fill?.feeC, 0, 'maker exit: no fee either');
+  assert.ok(Math.abs((tp.pnlC ?? 0) - 2 * pos.qty) < 1e-9, `+2c x qty, got ${tp.pnlC}`);
+  assert.equal(e.openPositions().length, 0);
+
+  // and with no take-profit, the TIME exit still crosses (taker fee) at the bid
+  e.enter({ ...sig(), strategy: 'F_MAKER' }, 'EV2', 'M2', book({ yesBid: 0.43, yesAsk: 0.44 }), T0 + 60_000);
+  e.onTick(T0 + 61_000, book(), { price: 0.43, ts: T0 + 61_000 });
+  const open = e.openPositions().find((x) => x.eventTicker === 'EV2');
+  assert.ok(open, 'second maker position filled');
+  const timeExit = e.onTick(T0 + 72_000, book({ yesBid: 0.44, yesAsk: 0.45 }), null)
+    .find((x) => x.position?.eventTicker === 'EV2');
+  assert.ok(timeExit, 'time exit taken');
+  assert.equal(timeExit?.reason, 'TIME_EXIT');
+  assert.ok((timeExit?.fill?.feeC ?? 0) > 0, 'crossing to exit pays the taker fee');
+});
+
+test('taker strategies keep crossing the book — maker mode is per-strategy', () => {
+  const db = new DatabaseSync(':memory:');
+  const e = new PaperEngine(db, cfg());
+  assert.equal(e.isMaker('F_MAKER'), true);
+  assert.equal(e.isMaker('B_MICRO'), false, 'B trades TAKER unless configured otherwise');
+  assert.equal(e.isMaker('A_LEADLAG'), false);
+  // an A signal still fills immediately at the ask with a fee
+  const d = e.enter(sig(), EV, MKT, book(), T0);
+  assert.equal(d.action, 'ENTER');
+  assert.equal(d.fill?.price, 0.44, 'taker entry at the ASK');
+  assert.ok((d.fill?.feeC ?? 0) > 0);
+  assert.equal(e.restingList().length, 0, 'no resting order for takers');
+});
