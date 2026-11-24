@@ -20,6 +20,11 @@ export interface RiskCandidate {
   target: number;
   confidence: number;
   horizon: Horizon;
+  /** Stop used ONLY for the min-risk/reward test when the executed stop was
+   *  pushed outside the ATR noise floor. Defaults to `invalidation`, so no
+   *  caller changes behavior by not passing it. Sizing always uses
+   *  `invalidation` — dollars at risk follow the stop that really exists. */
+  gateInvalidation?: number;
 }
 
 export interface RiskPosition {
@@ -99,9 +104,12 @@ export function evaluateEntry(
   const validStop = entry !== stop && Number.isFinite(entry) && Number.isFinite(stop);
   if (!validStop) reasons.push('invalid stop (entry equals invalidation)');
 
-  // 5. minimum risk/reward: (target - entry) / (entry - invalidation)
+  // 5. minimum risk/reward: (target - entry) / (entry - invalidation) —
+  // judged on the strategy's own stop when a noise floor widened the executed one
   const stopDistance = entry - stop;
-  const riskReward = stopDistance > 0 ? (target - entry) / stopDistance : Number.NEGATIVE_INFINITY;
+  const gateStop = candidate.gateInvalidation ?? stop;
+  const gateDistance = entry - gateStop;
+  const riskReward = gateDistance > 0 ? (target - entry) / gateDistance : Number.NEGATIVE_INFINITY;
   if (validStop && riskReward < limits.minRiskReward) reasons.push('risk/reward below minimum');
 
   // Size FIRST with the contract formula (risk / notional / cash caps

@@ -7,7 +7,7 @@
  * learning pipeline.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { checkExit, etDate, sessionKindAt, simulateFill } from '@promptslim/tucore';
+import { atr, checkExit, etDate, sessionKindAt, simulateFill } from '@promptslim/tucore';
 import type { ExitReason, Quote } from '@promptslim/tucore';
 import type { TuConfig } from './config.ts';
 import type { MarketDataProvider } from './providers/yahoo.ts';
@@ -35,6 +35,64 @@ export function regimeChangedDuringHold(
     now.regime !== sig.regime &&
     (ADVERSE_LONG_REGIMES as string[]).includes(now.regime)
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* 2026-11-24 exits fix: ATR ratchet + dead-trade cleanup              */
+/* ------------------------------------------------------------------ */
+
+/** ATR14 of a ticker from its daily bars, null when history is too thin. */
+function atrOf(db: DatabaseSync, ticker: string): number | null {
+  const bars = loadBars(db, ticker, 30);
+  if (bars.length < 15) return null;
+  const values = atr(bars, 14);
+  const last = values.length > 0 ? values[values.length - 1] : null;
+  return last !== null && Number.isFinite(last) && last > 0 ? last : null;
+}
+
+/** Initial risk per share (entry -> placed stop) as a FRACTION of entry. */
+function riskFraction(p: Pick<PositionRow, 'entry_price' | 'stop'>): number | null {
+  const r = p.entry_price - p.stop;
+  return r > 0 ? r / p.entry_price : null;
+}
+
+/**
+ * Ratchet: once MFE reaches trailingArmRMultiple x R, trail the stop at
+ * trailingAtrMultiple x ATR14 behind the peak — never tighter than the
+ * original stop and never moving DOWN (a stop only ever locks profit).
+ * Returns the trailing stop to hand to checkExit (null while unarmed).
+ */
+export function updateTrailingStop(
+  db: DatabaseSync,
+  p: Pick<PositionRow, 'id' | 'ticker' | 'entry_price' | 'stop' | 'mfe' | 'trailing_stop'>,
+  config: TuConfig,
+  peakPrice: number,
+): number | null {
+  if (config.trailingArmRMultiple <= 0 || config.trailingAtrMultiple <= 0) return p.trailing_stop;
+  const rFrac = riskFraction(p);
+  if (rFrac === null) return p.trailing_stop;
+  if (!(p.mfe >= config.trailingArmRMultiple * rFrac)) return p.trailing_stop; // not armed yet
+  const a = atrOf(db, p.ticker);
+  if (a === null) return p.trailing_stop;
+  const candidate = Math.max(peakPrice - config.trailingAtrMultiple * a, p.stop);
+  const previous = p.trailing_stop;
+  const next = previous === null || previous === undefined ? candidate : Math.max(previous, candidate);
+  if (!(next > (previous ?? -Infinity))) return previous ?? null;
+  db.prepare('UPDATE paper_positions SET trailing_stop = ? WHERE id = ?').run(next, p.id);
+  return next;
+}
+
+/** Dead-trade cleanup: a position that has sat for N sessions without ever
+ *  reaching M x R is closed at the day's price (exit_reason TIME_LIMIT — the
+ *  existing time-limit reason, so every downstream report keeps working). */
+export function isDeadTrade(
+  p: Pick<PositionRow, 'entry_price' | 'stop' | 'mfe' | 'sessions_held'>,
+  config: TuConfig,
+): boolean {
+  if (config.deadTradeSessions <= 0 || p.sessions_held < config.deadTradeSessions) return false;
+  const rFrac = riskFraction(p);
+  if (rFrac === null) return false;
+  return p.mfe < config.deadTradeMfeRMultiple * rFrac;
 }
 
 export interface PortfolioRow { kind: string; start_capital: number; cash: number; created_at: number }
@@ -221,15 +279,17 @@ export async function monitorPositions(
     marked += 1;
 
     if (!active) continue;
+    const peak = p.entry_price * (1 + mfe);
+    const trailingStop = updateTrailingStop(db, { ...p, mfe }, config, peak);
     const reason = checkExit(
       {
         side: 'LONG', entryPrice: p.entry_price, qty: p.qty, target: p.target, stop: p.stop,
-        trailingStop: p.trailing_stop, maxHoldSessions: p.max_hold, sessionsHeld: p.sessions_held,
+        trailingStop, maxHoldSessions: p.max_hold, sessionsHeld: p.sessions_held,
         thesisInvalidated: p.thesis_status === 'INVALIDATED', sellSignal: false,
         regimeChanged: regimeChangedDuringHold(db, p.signal_id),
       },
       { open: price, high, low, close: price, date: etDate(now) },
-    );
+    ) ?? (isDeadTrade({ ...p, mfe }, config) ? 'TIME_LIMIT' : null);
     if (reason) {
       // realistic stop handling: gap fills use the worse of stop/open
       const exitPrice = reason === 'STOP_REACHED' ? Math.min(p.stop, price) : reason === 'TARGET_REACHED' ? Math.max(p.target, price) : price;
@@ -254,7 +314,7 @@ export function settleEndOfDay(db: DatabaseSync, config: TuConfig, sessionDate?:
     const today = bars.find((b) => b.date === date);
     if (!today) continue;
     const sessionsHeld = bars.filter((b) => b.date > dateOf(p.entry_ts)).length;
-    const reason = checkExit(
+    let reason = checkExit(
       {
         side: 'LONG', entryPrice: p.entry_price, qty: p.qty, target: p.target, stop: p.stop,
         trailingStop: p.trailing_stop, maxHoldSessions: p.max_hold, sessionsHeld,
@@ -264,6 +324,22 @@ export function settleEndOfDay(db: DatabaseSync, config: TuConfig, sessionDate?:
       today,
     );
     db.prepare('UPDATE paper_positions SET sessions_held = ?, current_price = ? WHERE id = ?').run(sessionsHeld, today.close, p.id);
+    if (!reason) {
+      // end-of-day pass also runs the ratchet + dead-trade cleanup so a
+      // position that only qualifies after the close is handled in the same cycle
+      const peak = p.entry_price * (1 + p.mfe);
+      const trailingStop = updateTrailingStop(db, p, config, peak);
+      const settled = checkExit(
+        {
+          side: 'LONG', entryPrice: p.entry_price, qty: p.qty, target: p.target, stop: p.stop,
+          trailingStop, maxHoldSessions: p.max_hold, sessionsHeld,
+          thesisInvalidated: p.thesis_status === 'INVALIDATED', sellSignal: false,
+          regimeChanged: regimeChangedDuringHold(db, p.signal_id),
+        },
+        today,
+      );
+      reason = settled ?? (isDeadTrade({ ...p, sessions_held: sessionsHeld }, config) ? 'TIME_LIMIT' : null);
+    }
     if (reason) {
       const exitPrice = reason === 'STOP_REACHED' ? Math.min(p.stop, Math.max(today.open, p.stop))
         : reason === 'TARGET_REACHED' ? Math.max(p.target, Math.min(today.open, p.target))

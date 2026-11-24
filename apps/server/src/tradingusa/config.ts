@@ -30,6 +30,22 @@ export interface TuConfig {
   /** Widen the stop to N x ATR14 when (and only when) the target still
    *  affords minRiskReward — 71% of exits were stops inside noise. */
   stopAtrMultiple: number;
+  /** NOISE FLOOR (2026-11-24 exits fix): a stop may never sit closer than
+   *  N x ATR14 to entry — measured market-noise floor is ~0.38 ATR and stops
+   *  inside it were consumed by ordinary noise (25 of 51 trades stopped out
+   *  on day 1). Applied AFTER the strategy's own stop and widening, and the
+   *  reward/risk gate keeps evaluating the strategy's stop, so the floor
+   *  never removes a trade — it only moves the protective stop out of the
+   *  noise; sizing then uses the wider stop, keeping dollars-at-risk fixed. */
+  stopAtrFloorMultiple: number;
+  /** Ratchet: once MFE reaches N x R, trail the stop at M x ATR14 behind the
+   *  peak, never tighter than the original stop (monotone, ratcheting). 0 off. */
+  trailingArmRMultiple: number;
+  trailingAtrMultiple: number;
+  /** Dead-trade cleanup: close after N sessions if MFE never reached
+   *  M x R (exit_reason TIME_LIMIT). 0 off. */
+  deadTradeSessions: number;
+  deadTradeMfeRMultiple: number;
   workers: boolean;
   dbPath: string;
   universe: string[] | null;
@@ -54,6 +70,15 @@ export function tuConfigFromEnv(env: Record<string, string | undefined> = proces
   const minSignalConfidence = num(env.TU_MIN_SIGNAL_CONFIDENCE, 0.7);
   const reentryCooldownSessions = num(env.TU_REENTRY_COOLDOWN_SESSIONS, 3);
   const stopAtrMultiple = num(env.TU_STOP_ATR_MULTIPLE, 2);
+  const nonNeg = (v: string | undefined, d: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : d;
+  };
+  const stopAtrFloorMultiple = Math.min(nonNeg(env.TU_STOP_ATR_FLOOR, 0.8), 5);
+  const trailingArmRMultiple = Math.min(nonNeg(env.TU_TRAIL_ARM_R, 1), 10);
+  const trailingAtrMultiple = Math.min(nonNeg(env.TU_TRAIL_ATR, 1.2), 10);
+  const deadTradeSessions = Math.min(nonNeg(env.TU_DEAD_TRADE_SESSIONS, 5), 120);
+  const deadTradeMfeRMultiple = Math.min(nonNeg(env.TU_DEAD_TRADE_MFE_R, 0.5), 10);
   return {
     executionMode: EXECUTION_MODE,
     pilotMode: (env.PILOT_MODE ?? 'true').toLowerCase() !== 'false',
@@ -70,6 +95,11 @@ export function tuConfigFromEnv(env: Record<string, string | undefined> = proces
     minSignalConfidence: Math.min(Math.max(minSignalConfidence, 0), 1),
     reentryCooldownSessions: Math.min(Math.max(reentryCooldownSessions, 0), 60),
     stopAtrMultiple: Math.min(Math.max(stopAtrMultiple, 0), 5),
+    stopAtrFloorMultiple,
+    trailingArmRMultiple,
+    trailingAtrMultiple,
+    deadTradeSessions,
+    deadTradeMfeRMultiple,
     workers: (env.TU_WORKERS ?? '0') === '1',
     dbPath: env.TU_DB ?? 'data/tradingusa.db',
     universe: env.TU_UNIVERSE ? env.TU_UNIVERSE.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean) : null,

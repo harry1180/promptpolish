@@ -19,7 +19,7 @@
  *     than ±MAX_SHIFT of its shipped default and none is silenced below
  *     MIN_SHARE of it. `engine.runScan` reads the result and passes it to
  *     `fuse()`; absent/insufficient rows leave the shipped defaults in place.
- *  3. REFRESH: consolidate() + weight re-fit + lesson review in one daily
+ * 3. REFRESH: consolidate() + weight re-fit + outcome calibration + lesson review in one daily
  *     job, each step logged as a learning_events row so the UI can show the
  *     delta. A lesson whose contradictions dominate is REVOKED (its gate
  *     turns off), and it may be re-proposed after its mistake cluster has
@@ -29,6 +29,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { FUSION_WEIGHTS } from '@promptslim/tucore';
 import type { Horizon, ScoreParts } from '@promptslim/tucore';
 import { consolidate } from './learning.ts';
+import { recomputeCalibration } from './calibration.ts';
 
 const PART_KEYS: Array<keyof ScoreParts> = ['technical', 'fundamental', 'event', 'sentiment', 'macro', 'regime'];
 
@@ -330,6 +331,9 @@ export interface RefreshResult {
   weightsChanged: number;
   revoked: number;
   reproposed: number;
+  /** closed trades behind the shadow confidence/return calibration */
+  calibrationSamples: number;
+  calibrationSufficient: boolean;
 }
 
 /** One daily pass: merge/expire/validate lessons, re-fit weights from new
@@ -339,10 +343,12 @@ export function refreshKnowledge(db: DatabaseSync, now = Date.now()): RefreshRes
   const c = consolidate(db, now);
   const w = recomputeStrategyWeights(db, now);
   const review = reviewLessons(db, now);
+  const cal = recomputeCalibration(db, now);
   const result: RefreshResult = {
     merged: c.merged, expired: c.expired, validated: c.validated,
     strategies: w.strategies, weightsChanged: w.changed,
     revoked: review.revoked, reproposed: review.reproposed,
+    calibrationSamples: cal.samples, calibrationSufficient: cal.sufficient,
   };
   event(db, 'KNOWLEDGE_REFRESH', result as unknown as Record<string, unknown>, now);
   return result;

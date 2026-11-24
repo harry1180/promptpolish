@@ -22,6 +22,9 @@ import type {
 // (Candle also used as a value-type annotation in backfillBars)
 import type { MarketDataProvider } from './providers/yahoo.ts';
 import { learnedWeights } from './adaptive.ts';
+import { loadCalibration } from './calibration.ts';
+import { calibratedReturn, calibratedWinRate } from '@promptslim/tucore';
+import type { Calibration } from '@promptslim/tucore';
 import type { TuConfig } from './config.ts';
 import { universeEntry, tradableUniverse, BENCHMARKS, SECTOR_ETFS } from './universe.ts';
 
@@ -523,6 +526,9 @@ export async function runScan(deps: ScanDeps): Promise<ScanResult> {
   // losing trade cannot move the book.
   const learnedShort = learnedWeights(db, 'st_multi_factor_v1', 'SHORT');
   const learnedLong = learnedWeights(db, 'lt_quality_growth_v1', 'LONG');
+  // shadow outcome calibration: what this book's own history says the raw
+  // confidence / expected return are worth. Recorded on every signal only.
+  const calibration = loadCalibration(db);
 
   // quotes for the core set only (indexes + live paper exposure + signal
   // tickers); everything else is analyzed from its latest daily bar — the
@@ -621,16 +627,28 @@ export async function runScan(deps: ScanDeps): Promise<ScanResult> {
             const rrWidened = (st.target - quote.price) / (quote.price - widened);
             if (rrWidened >= config.minRiskReward) invalidation = widened;
           }
+          // NOISE FLOOR: the reward/risk gate keeps judging the stop above, but
+          // the stop that gets PLACED may never sit closer than
+          // stopAtrFloorMultiple x ATR14 to entry (measured noise floor ~0.38 ATR;
+          // 25 of 51 trades were stopped out inside it on day 1). Purely
+          // execution-side: no trade is added or removed, sizing follows the
+          // wider stop so dollars-at-risk stay at riskPerTradePct.
+          const gateInvalidation = invalidation;
+          if (atrVal > 0 && config.stopAtrFloorMultiple > 0) {
+            const floored = quote.price - config.stopAtrFloorMultiple * atrVal;
+            if (floored < invalidation) invalidation = floored;
+          }
           emitSignal({
             db, config, now, session, sessionDate, entry, action,
             confidence: fused.confidence, price: quote.price,
             entryLow: st.entryLow, entryHigh: st.entryHigh, target: st.target, invalidation,
+            gateInvalidation,
             expectedHold: st.expectedHoldSessions, maxHold: st.maxHoldSessions,
             strategy: 'st_multi_factor_v1', horizon: 'SHORT', portfolio: 'SHORT_TERM_PORTFOLIO',
             evidence: st.evidence, contradictions: st.contradictions,
             scores: { ...parts, risk: 0 }, regime, freshness,
             portfolioStateRef: stState, barsAsOf: lastBar.date, quoteTs: quote.ts,
-            regimeConfidence: regimeInfo.confidence, fused, result,
+            regimeConfidence: regimeInfo.confidence, fused, calibration, result,
             // the volume lesson's own threshold, captured at entry so the
             // outcome loop can tell a confirmed lesson from a contradicted one
             entryChecks: { relativeVolume: Number(st.factors.relativeVolume ?? 0) },
@@ -662,7 +680,7 @@ export async function runScan(deps: ScanDeps): Promise<ScanResult> {
             evidence: lt.evidence, contradictions: lt.contradictions,
             scores: { ...parts, risk: 0 }, regime, freshness,
             portfolioStateRef: ltState, barsAsOf: lastBar.date, quoteTs: quote.ts,
-            regimeConfidence: regimeInfo.confidence, fused, result,
+            regimeConfidence: regimeInfo.confidence, fused, calibration, result,
           });
         }
       }
@@ -684,7 +702,12 @@ interface EmitArgs {
   db: DatabaseSync; config: TuConfig; now: number; session: string; sessionDate: string;
   entry: { ticker: string; company: string; sector: string }; action: SignalAction;
   confidence: number; price: number; entryLow: number; entryHigh: number; target: number;
-  invalidation: number; expectedHold: number; maxHold: number; strategy: string;
+  invalidation: number;
+  /** the strategy's own stop when `invalidation` was pushed out to the ATR
+   *  noise floor: the reward/risk gate judges this one, sizing and the placed
+   *  order use `invalidation`. Defaults to `invalidation` when absent. */
+  gateInvalidation?: number;
+  expectedHold: number; maxHold: number; strategy: string;
   horizon: 'SHORT' | 'LONG'; portfolio: string; evidence: unknown; contradictions: unknown;
   scores: ScoreParts & { risk: number }; regime: Regime; freshness: number;
   portfolioStateRef: PortfolioState; barsAsOf: string; quoteTs: number;
@@ -694,6 +717,8 @@ interface EmitArgs {
    *  audit_json so adaptive.learnFromOutcome can score outcomes against them */
   entryChecks?: Record<string, number>;
   fused: { action: SignalAction; confidence: number; conflicts: string[]; weighted: number };
+  /** last fitted outcome calibration (null until the daily refresh has run) */
+  calibration: Calibration | null;
   result: ScanResult;
 }
 
@@ -708,7 +733,11 @@ function emitSignal(a: EmitArgs): void {
   if (dup) { a.result.skippedDuplicate += 1; return; }
 
   const stopDistRaw = a.price - a.invalidation;
-  const stopDist = Math.max(0.01, stopDistRaw);
+  // reward/risk is judged on the STRATEGY's stop (gateInvalidation) so the
+  // ATR noise floor can never shrink the trade flow; sizing uses the placed stop
+  const gateInvalidation = a.gateInvalidation ?? a.invalidation;
+  const gateDistRaw = a.price - gateInvalidation;
+  const stopDist = Math.max(0.01, gateDistRaw);
   const rr = ((a.target - a.price) / stopDist);
   const expectedReturn = (a.target - a.price) / a.price;
 
@@ -717,7 +746,7 @@ function emitSignal(a: EmitArgs): void {
    * sense to trade (overhead resistance, degenerate stops). Those never
    * become signal records. */
   if (a.action === 'BUY' || a.action === 'SELL') {
-    const saneStop = stopDistRaw >= a.price * 0.005; // stop at least 0.5% away
+    const saneStop = gateDistRaw >= a.price * 0.005; // stop at least 0.5% away
     const saneRr = rr >= config.minRiskReward && rr <= 20;
     const positiveUpside = a.target > a.price;
     if (a.action === 'BUY' && (!saneStop || !saneRr || !positiveUpside)) {
@@ -741,6 +770,7 @@ function emitSignal(a: EmitArgs): void {
     {
       ticker: entry.ticker, sector: entry.sector, price: a.price, entryLow: a.entryLow,
       invalidation: a.invalidation, target: a.target, confidence: a.confidence, horizon: a.horizon,
+      gateInvalidation,
     },
     {
       riskPerTradePct: config.riskPerTradePct, maxPositionPct: config.maxPositionPct,
@@ -764,6 +794,14 @@ function emitSignal(a: EmitArgs): void {
     { check: 'kill_switch', passed: true, detail: 'no kill-switch condition' },
     { check: 'execution_mode', passed: true, detail: 'PAPER_ONLY' },
     { check: 'position_size', passed: risk.approved, detail: risk.approved ? `${risk.sizeShares} shares, $${risk.riskAmount.toFixed(0)} at risk` : risk.reasons.join('; ') },
+    {
+      check: 'stop_floor',
+      passed: true,
+      detail:
+        stopDistRaw > gateDistRaw + 1e-9
+          ? `stop pushed from ${((gateDistRaw / a.price) * 100).toFixed(2)}% to ${((stopDistRaw / a.price) * 100).toFixed(2)}% (ATR noise floor; sizing follows the placed stop)`
+          : `strategy stop already outside the ATR noise floor (${((stopDistRaw / a.price) * 100).toFixed(2)}%)`,
+    },
     {
       check: 'reentry_cooldown',
       passed: !cooldown,
@@ -798,6 +836,17 @@ function emitSignal(a: EmitArgs): void {
       inputs: { barsAsOf: a.barsAsOf, quoteTs: a.quoteTs, regime: a.regime, regimeConfidence: a.regimeConfidence },
       conflicts: a.fused.conflicts, weighted: a.fused.weighted,
       entryChecks: a.entryChecks ?? {},
+      // SHADOW: what this book's own closed trades say this signal's raw
+      // numbers are worth (tucore calibration). Recorded, never acted on.
+      calibration: a.calibration
+        ? {
+            sufficient: a.calibration.sufficient,
+            samples: a.calibration.n,
+            updatedAt: a.calibration.updatedAt,
+            winRate: Number(calibratedWinRate(a.calibration, a.confidence).toFixed(4)),
+            expectedReturn: Number(calibratedReturn(a.calibration, expectedReturn).toFixed(4)),
+          }
+        : null,
       pipeline: ['market_data', 'features', 'strategies', 'fusion', 'risk', 'signal'],
     },
     knowledgeRefs: [], eventRefs, llm: null,

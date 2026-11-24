@@ -239,6 +239,9 @@ CREATE TABLE IF NOT EXISTS tu_config (
 CREATE TABLE IF NOT EXISTS earnings_calendar (
   ticker TEXT PRIMARY KEY, next_earnings_date TEXT NOT NULL, fetched_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS calibration_state (
+  key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
 `;
 
 export function openTradingDb(path: string): DatabaseSync {
@@ -258,5 +261,5 @@ export const TRADING_TABLES = [
   'strategy_performance','challengers','mistakes','mistake_clusters','knowledge_lessons',
   'learning_events','candidate_rules','backtest_runs','llm_usage','llm_cache',
   'llm_evaluations','prediction_results','audit_log','system_jobs','daily_reviews',
-  'weekly_reviews','data_quality','tu_config','earnings_calendar',
+  'weekly_reviews','data_quality','tu_config','earnings_calendar','calibration_state',
 ] as const;

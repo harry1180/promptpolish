@@ -25,6 +25,8 @@ import { tradableUniverse, universeEntry, UNIVERSE } from './universe.ts';
 import { runBacktestJob, triggerBacktest } from './backtest.ts';
 import { buildReport, reportRange } from './report.ts';
 import { experimentSummary } from './experiments.ts';
+import { computeCalibration, loadCalibration } from './calibration.ts';
+import { calibratedReturn, calibratedWinRate } from '@promptslim/tucore';
 
 export interface TuDeps {
   runtime: TradingRuntime;
@@ -494,6 +496,42 @@ export async function handleTradingusa(
               defaults: FUSION_WEIGHTS[w.horizon as Horizon] ?? FUSION_WEIGHTS.SHORT,
             };
           }),
+        },
+      });
+    }
+
+    /* ---------------- outcome calibration (SHADOW, read-only) ---------------- */
+    if (rest[0] === 'calibration' && req.method === 'GET') {
+      const cal = computeCalibration(db, now);
+      const stored = loadCalibration(db);
+      const pct = (v: number): number => Math.round(v * 1000) / 10;
+      return done({
+        status: 200,
+        body: {
+          mode: 'SHADOW',
+          note: 'Calibrated from this book\'s own closed trades (60-session half-life). Recorded on every signal; it never gates, filters or sizes a trade.',
+          sufficient: cal.sufficient,
+          samples: cal.n,
+          effectiveSamples: Math.round(cal.effectiveN * 10) / 10,
+          halfLifeDays: cal.halfLifeDays,
+          prior: { winRatePct: pct(cal.priorWinRate), meanReturnPct: pct(cal.priorMeanReturn) },
+          buckets: cal.buckets.map((b) => ({
+            from: b.lo, to: b.hi, samples: b.n,
+            winRatePct: pct(b.winRate), meanReturnPct: pct(b.meanReturn), sePct: pct(b.se),
+          })),
+          returnModel: {
+            slope: Number(cal.returnModel.slope.toFixed(4)),
+            interceptPct: pct(cal.returnModel.intercept),
+            r: Number(cal.returnModel.r.toFixed(4)),
+            meanPredictedPct: pct(cal.returnModel.meanPredicted),
+            meanActualPct: pct(cal.returnModel.meanActual),
+          },
+          mapping: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9].map((c) => ({
+            confidence: c,
+            calibratedWinRatePct: pct(calibratedWinRate(cal, c)),
+            calibratedReturnPct: pct(calibratedReturn(cal, c)),
+          })),
+          storedAt: stored?.updatedAt ?? null,
         },
       });
     }
